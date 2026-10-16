@@ -107,6 +107,8 @@ const sandbox = {
     removeItem(k) { delete this._m[k]; },
   },
 };
+sandbox.location.reload = () => { sandbox.__reloaded = true; };   // 记下「页面被要求刷新」
+sandbox.__reloaded = false;
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 sandbox.window.matchMedia = () => ({
@@ -617,6 +619,31 @@ try {
 
 /* 应用内确认弹窗：真开一遍、真点一遍，断言 Promise 的取值 */
 (async () => {
+  console.log('────────────────────────────────────────');
+  console.log('▸ 自己升级自己后自动刷新界面');
+  try {
+    sandbox.__reloaded = false;
+    sandbox.__setState({
+      apps: [], tasks: [], last_check: null, has_token: true,
+      app_version: '99.0.0',                 // 比加载时的版本新 → 说明自己升级了自己
+      checking: { running: false, done: 0, total: 0, current: '' },
+      settings: { download_dir: '/v', concurrency: 4, mirror: '', auto_download: false,
+        auto_clean: true, theme: 'auto' },
+      packages: { count: 0, size: 0, foreign_count: 0, foreign_size: 0, parts_count: 0, parts_size: 0 },
+      whitelist: [], mirror_presets: [], default_download_dir: '/v',
+    });
+    sandbox.__render();
+    await new Promise((r) => setTimeout(r, 1400));   // 等自动刷新的定时器真的跑完
+    const toasts = sandbox.__els('toasts').children.map((c) => c.textContent).join(' | ');
+    const ok1 = sandbox.__reloaded === true;
+    const ok2 = toasts.includes('正在刷新界面');
+    console.log(`  ${ok1 && ok2 ? '✔' : '✘'} 版本变了 → 提示并自动刷新页面  -> "${toasts.slice(-40)}"`);
+    if (!(ok1 && ok2)) bad++;
+  } catch (e) {
+    console.log('  ✘ 抛异常 -> ' + e.message);
+    bad++;
+  }
+
   console.log('────────────────────────────────────────');
   console.log('▸ 应用内确认弹窗（替掉浏览器原生 confirm）');
   try {

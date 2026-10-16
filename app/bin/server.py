@@ -1528,8 +1528,14 @@ def enqueue(appname, action):
                 return t["id"]          # 同一个应用的同一动作已在排队/运行，不重复排
         d["seq"] = int(d.get("seq") or 0) + 1
         tid = "t%d" % d["seq"]
+        # 目标版本在**入队时**就记：自更新时进程会在升级中途被重启，重启后靠它判断
+        # 「到底装上了没」。写在这里比「下载完再写」更早，进程更早掉也不怕。
+        _tgt = ""
+        if action in ("install", "update"):
+            _tgt = str((state_item(appname) or {}).get("latest") or "")
         d["tasks"].append({
             "id": tid, "appname": appname, "display": app["display"] or appname,
+            "version": (_tgt or None),
             "action": action, "status": "queued", "stage": "queued",
             # percent 用 None（= 进度未知），界面据此显示「不确定态」进度条。
             # 写 0 的话界面会画一条 0% 的空条，看起来像卡住了（实测观感问题）。
@@ -2734,8 +2740,11 @@ class Handler(BaseHTTPRequestHandler):
             # 服务重启后残留的 running 状态 → 归为未知，别让界面永远转圈
             for t in tasks:
                 if t.get("status") == "running" and not _worker_alive():
-                    update_task(t["id"], status="failed", stage="error",
-                                message="上一次任务在服务重启时中断，请重试")
+                    # ⚠️ 变量名不要用 st —— 上面 st 是缓存状态，被这里覆盖后
+                    # 后面的 st.get("at") 会抛异常、整个 /api/state 变 500（实测踩过）
+                    _jst, _jstage, _jmsg, _jpct = judge_interrupted(t)
+                    update_task(t["id"], status=_jst, stage=_jstage, message=_jmsg,
+                                percent=(_jpct if _jpct is not None else t.get("percent")))
             tasks = list_tasks()
             return self._json({
                 "ok": True,
@@ -3235,6 +3244,28 @@ def checker_loop():
         time.sleep(max(300, CHECK_INTERVAL_MIN * 60))
 
 
+def judge_interrupted(t):
+    """重启后遇到残留的「进行中」任务：判断它其实是不是已经完成了。
+
+    返回 (status, stage, message, percent)。两条自愈路径（启动时、/api/state 兜底）共用，
+    免得一条认成功、另一条把它改回失败 —— 那正是自更新时用户看到的矛盾现象。
+
+    判据：任务记了目标版本（`version`），而该应用现在装的正好就是这个版本 → 其实成功了。
+    ⚠️ 前提是**执行升级的那个进程**已经会记录目标版本；若执行者是更旧的版本（没这行代码），
+    目标版本就是空的，只能按中断处理（实测第一次自更新就是这样）。
+    """
+    _app = str(t.get("appname") or "")
+    _tgt = str(t.get("version") or "")
+    _act = str(t.get("action") or "")
+    done = (_act in ("install", "update") and bool(_app and _tgt)
+            and norm_version(installed_version(_app) or "") == norm_version(_tgt))
+    if done:
+        _label = {"install": "安装", "update": "更新"}.get(_act, "任务")
+        return ("ok", "done",
+                "%s完成：%s（升级过程中服务重启过，已确认装好）" % (_label, _tgt), 100)
+    return ("failed", "error", "上一次任务在服务重启时中断了，请重试", t.get("percent"))
+
+
 def _recover_stale_tasks():
     """启动时收拾上一次进程留下的「进行中」任务。
 
@@ -3258,22 +3289,15 @@ def _recover_stale_tasks():
                 # 应用中心会在升级中途把进程重启 —— 那条任务并不是失败。
                 # 判据：任务记了目标版本，而该应用现在装的正好就是这个版本 → 其实成功了。
                 # （只有 install/update 会改「已装版本」，download 不套用这条。）
-                _app = str(t.get("appname") or "")
-                _tgt = str(t.get("version") or "")
-                _act = str(t.get("action") or "")
-                _done = (_act in ("install", "update") and bool(_app and _tgt)
-                         and norm_version(installed_version(_app) or "") == norm_version(_tgt))
-                if _done:
-                    _label = {"install": "安装", "update": "更新"}.get(_act, "任务")
-                    t["status"] = "ok"
-                    t["stage"] = "done"
-                    t["percent"] = 100
-                    t["message"] = "%s完成：%s（升级过程中服务重启过，已确认装好）" % (_label, _tgt)
-                    log("启动自愈：%s 的 %s 任务在重启前已完成（已装 %s）" % (_app, _act, _tgt))
-                else:
-                    t["status"] = "failed"
-                    t["stage"] = "error"
-                    t["message"] = "上一次任务在服务重启时中断了，请重试"
+                st, stage, msg, pct = judge_interrupted(t)
+                t["status"] = st
+                t["stage"] = stage
+                t["message"] = msg
+                if pct is not None:
+                    t["percent"] = pct
+                if st == "ok":
+                    log("启动自愈：%s 的 %s 任务在重启前已完成（已装 %s）"
+                        % (t.get("appname"), t.get("action"), t.get("version")))
                 t["finished_at"] = now_iso()
                 t["updated_at"] = now_iso()
                 n += 1

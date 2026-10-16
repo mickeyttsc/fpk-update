@@ -541,6 +541,36 @@ def main():
     chk(tk["tDl"]["status"] == "failed", "下载任务不套用这条判定（它不改已装版本）",
         tk["tDl"]["status"])
 
+    # ── 6i. 入队时就记下目标版本（自更新容错更强）──
+    print("▸ 入队即记目标版本（比「下载完再记」更早，进程更早掉也不怕）")
+    s.load_whitelist = lambda: [{"repo": "o/n", "appname": "installed-one", "display": "X"}]
+    import json as _j
+    with open(os.path.join(tmp, "last-check.json"), "w", encoding="utf-8") as f:
+        _j.dump({"at": "2026-01-01T00:00:00+08:00", "trigger": "manual",
+                 "apps": [{"appname": "installed-one", "installed": "1.2.3",
+                           "latest": "1.2.4", "update_available": True,
+                           "error": None, "sha256": "a" * 64, "downloaded": None,
+                           "local_unknown": None}]}, f)
+    tid = s.enqueue("installed-one", "update")
+    t = [x for x in s.list_tasks() if x["id"] == tid][0]
+    chk(t.get("version") == "1.2.4", "update 任务入队时就带上目标版本", t.get("version"))
+    s.clear_finished_tasks()
+
+    # ── 6j. 两条自愈路径必须同一判定 ──
+    print("▸ 两条自愈路径同一判定（否则一条认成功、另一条改回失败）")
+    s._save_tasks({"seq": 9, "tasks": [
+        {"id": "tJ", "appname": "installed-one", "display": "X", "action": "update",
+         "status": "running", "message": "正在升级…", "version": "9.9"}]})
+    s.installed_version = lambda n: "9.9"
+    st, stage, msg, pct = s.judge_interrupted(s.list_tasks()[0])
+    chk(st == "ok" and "装好" in msg, "共享判定认得出「其实装好了」", (st, msg))
+    st2, _s2, msg2, _p2 = s.judge_interrupted({"appname": "installed-one", "action": "update",
+                                               "version": "8.8"})
+    chk(st2 == "failed", "版本没对上仍判失败", st2)
+    s._recover_stale_tasks()
+    chk({x["id"]: x["status"] for x in s.list_tasks()}["tJ"] == "ok", "启动自愈与它一致")
+    s.clear_finished_tasks()
+
     # ── 7. 自愈必须真的接在启动流程里（只定义不调用等于没修）──
     print("▸ 启动流程接线")
     import ast

@@ -89,6 +89,8 @@ def main():
         (srv, "升级过程中服务重启过", "自更新/升级中途重启的任务记为完成（不是失败）"),
         (srv, "def _method_not_allowed", "其它方法回 405 JSON（不再回 501）"),
         (js, "function notifyFinishedTasks", "任务完成单独弹通知"),
+        (srv, "def judge_interrupted", "两条自愈路径共用同一判定（不再误报中断失败）"),
+        (js, "selfUpdated", "自己升级自己后自动刷新界面"),
         (js, "· ' + path + ')", "错误提示带上出错的接口路径（便于定位）"),
         (srv, "include_current", "清理接口支持显式「连当前版本一起清」"),
         (js, "keep-current-input", "设置里有「清理时保留当前版本」开关"),

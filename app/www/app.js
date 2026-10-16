@@ -445,6 +445,8 @@ function syncInput(id, val) {
 
 let lastChecking = false;      // 用于识别「检查刚结束」，只在那一刻弹结论
 let notifiedTasks = null;      // 已经通知过的任务 id（避免每轮轮询重复弹）
+let bootVersion = '';          // 页面加载时本应用的版本（用于识别「自己升级了自己」）
+let selfUpdated = false;       // 只自动刷新一次，别循环
 
 /* 任务结束时弹一条通知 —— 而不是在卡片上长期留一条结果条。
    用户要的是：「更新完成」单独弹一下，卡片恢复成和其他「已是最新」一样的普通形态。 */
@@ -500,6 +502,16 @@ function render() {
 
   // 任务结束 → 单独弹一条通知（成功与失败都弹；失败另外还留在卡片上可重试）
   notifyFinishedTasks(s.tasks);
+
+  /* 自己升级了自己 → 页面加载的 JS/CSS 已经过期，必须刷新。
+     为什么单独处理：自更新时应用中心会重启进程，页面还停在旧文件上；
+     而且这是唯一「刷新之后界面才正确」的场景（其他升级都不影响本页面）。 */
+  if (!selfUpdated && bootVersion && s.app_version && s.app_version !== bootVersion) {
+    selfUpdated = true;
+    toast('本应用已更新到 ' + s.app_version + '，正在刷新界面…', 'ok', 3000);
+    setTimeout(() => { try { location.reload(); } catch (e) { /* 忽略 */ } }, 1200);
+  }
+  if (!bootVersion && s.app_version) bootVersion = s.app_version;
 
   const cards = $('cards');
   const apps = s.apps || [];

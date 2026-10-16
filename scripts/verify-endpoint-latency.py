@@ -196,6 +196,17 @@ def main():
     chk(b"ok" in body_put and "不支持".encode() in body_put,
         "405 也是 JSON 且说明原因", body_put[:60])
 
+    # ★ /api/state 的兜底自愈也要认「其实装好了」（进程没起 worker 时走这条）
+    with open(os.path.join(var, "tasks.json"), "w", encoding="utf-8") as f:
+        json.dump({"seq": 1, "tasks": [
+            {"id": "tG", "appname": "installed-one", "display": "X", "action": "update",
+             "status": "running", "message": "正在升级…", "version": "1.2.3"}]}, f)
+    _, _, _, raw_st = call("/api/state", reps=1)
+    _tsk = (json.loads(raw_st).get("tasks") or [{}])[0]
+    chk(_tsk.get("status") == "ok", "/api/state 兜底把「版本已对上」的任务认成完成",
+        (str(_tsk.get("status")), str(_tsk.get("message"))[:40]))
+    os.remove(os.path.join(var, "tasks.json"))
+
     # /api/check 必须是「立刻返回、后台跑」，不能等整轮检查
     t0 = time.time()
     call("/api/check", {"force": True}, reps=1)

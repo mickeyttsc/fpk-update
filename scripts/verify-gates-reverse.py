@@ -67,7 +67,9 @@ BREAKS = [
      "    if False:"),
     ("OPTIONS 预检不实现（退回 501）",
      "    def do_OPTIONS(self):", "    def do_OPTIONS_disabled(self):"),
-    ("自更新后不认「已装好」（记成中断失败）", "                if _done:", "                if False:"),
+    ("共享判定失效（重启后不再认「已装好」）",
+     '    done = (_act in ("install", "update") and bool(_app and _tgt)',
+     '    done = False and (_act in ("install", "update") and bool(_app and _tgt)'),
     ("清理不再保留当前版本的包",
      "        if it.get(\"current\") and not include_current:", "        if False:"),
     ("「已是最新就不下载」判定失效",
@@ -113,6 +115,7 @@ FILE_BREAKS = [
 
 # 前端破坏用例：(标签, 原文, 改成) —— 跑 render-selftest.js 应当报红
 FE_BREAKS = [
+    ("自更新后不再自动刷新界面", "  if (!selfUpdated && bootVersion", "  if (false)"),
     ("成功时又留结果条（卡片不回到普通形态）",
      "  if (ok) return null;", "  if (false) return null;"),
     ("卡片改回全量重建（不再复用节点）",
