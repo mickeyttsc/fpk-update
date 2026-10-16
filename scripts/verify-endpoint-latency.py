@@ -12,6 +12,7 @@
 """
 import http.client
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -90,6 +91,11 @@ def main():
         "asset_name": "a.fpk", "asset_url": "http://x/a.fpk", "sha256": "a" * 64,
         "size": 1000, "published_at": None, "notes": "", "source_kind": "repo"}
     m.find_release = lambda repo, allow_pre=False, want_tag="", force=False: REL
+    m.wizard_spec_for = lambda app, rel: {
+        "fields": [{"type": "text", "field": "wizard_app_port", "label": "端口",
+                    "initValue": "47939",
+                    "rules": [{"required": True, "message": "请填端口"}]}],
+        "source": "stub", "defer": False, "local_ready": False}
     m.check_one = lambda a, force=False: {"appname": a.get("appname"), "display": a.get("display"),
                              "installed": "1.2.3", "latest": "1.2.4",
                              "update_available": True, "error": None, "sha256": "a" * 64,
@@ -123,6 +129,8 @@ def main():
     CASES = [
         ("GET  /api/health", "/api/health", None),
         ("GET  /api/state", "/api/state", None),
+        ("GET  /api/volumes", "/api/volumes", None),
+        ("GET  /api/wizard(已装)", "/api/wizard?appname=installed-one", None),
         ("GET  /api/tasks", "/api/tasks", None),
         ("GET  /api/packages", "/api/packages", None),
         ("GET  /api/log", "/api/log?lines=200", None),
@@ -278,13 +286,91 @@ def main():
         "添加结果写进了列表（等装好自动转正）")
 
     _, c_upd2, _, raw_upd2 = call("/api/update", {"appname": "not-yet-app"}, reps=1)
-    chk(c_upd2 == 409, "未安装的应用点「更新」被接口拒绝（界面不是唯一调用方）", c_upd2)
-    chk("应用中心" in raw_upd2.decode(), "拒绝信息里说清去哪里装（应用中心）",
+    chk(c_upd2 == 409, "未安装的应用点「update」被接口拒绝（语义只对已装应用）", c_upd2)
+    chk("安装" in raw_upd2.decode(), "拒绝信息里给正确的指路（点「安装」）",
         raw_upd2.decode()[:80])
-    _, c_ins2, _, _ = call("/api/install", {"appname": "not-yet-app"}, reps=1)
-    chk(c_ins2 == 409, "未安装的应用点「安装」同样被拒绝", c_ins2)
+    _, c_ins2, _, raw_ins2 = call("/api/install", {"appname": "not-yet-app", "volume": 2}, reps=1)
+    chk(c_ins2 == 200, "未安装的应用「安装」（完整安装）放行（入队）", c_ins2)
+    with open(os.path.join(var, "tasks.json"), encoding="utf-8") as f:
+        _tasks = json.load(f).get("tasks") or []
+    _t2 = next((t for t in _tasks
+                if t.get("appname") == "not-yet-app" and t.get("action") == "install"), {})
+    chk(_t2.get("volume") == 2,
+        "安装任务带着存储空间编号（volume）入队", (_t2.get("action"), _t2.get("volume")))
+    _, c_vol_bad, _, raw_vol_bad = call("/api/install",
+                                        {"appname": "not-yet-app", "volume": 999}, reps=1)
+    chk(c_vol_bad == 400, "非法存储空间编号被拒（不是照单全收）", c_vol_bad)
+    # 清掉上面入队的安装任务：下面参数用例要重新入队（同应用同动作会被去重合并）
+    with open(os.path.join(var, "tasks.json"), "w", encoding="utf-8") as f:
+        json.dump({"seq": 0, "tasks": []}, f)
+    # 安装参数（wizard 字段）边界：参数会写进安装环境，名字必须像变量名、值不能带换行
+    _, c_p1, _, _ = call("/api/install", {"appname": "not-yet-app", "volume": 2,
+                                          "params": {"bad name!": "x"}}, reps=1)
+    chk(c_p1 == 400, "安装参数名不合法被拒（挡环境变量注入）", c_p1)
+    _, c_p2, _, _ = call("/api/install", {"appname": "not-yet-app", "volume": 2,
+                                          "params": {"wizard_a": "x\nwizard_b=1"}}, reps=1)
+    chk(c_p2 == 400, "安装参数值含换行被拒（挡 env 文件注入）", c_p2)
+    _, c_p3, _, _ = call("/api/install", {"appname": "not-yet-app", "volume": 2,
+                                          "params": {"wizard_app_port": "48080",
+                                                     "wizard_on": True}}, reps=1)
+    chk(c_p3 == 200, "合法安装参数随任务入队", c_p3)
+    with open(os.path.join(var, "tasks.json"), encoding="utf-8") as f:
+        _tasks3 = json.load(f).get("tasks") or []
+    _t3 = next((x for x in _tasks3
+                if x.get("appname") == "not-yet-app" and x.get("action") == "install"), {})
+    chk(_t3.get("params") == {"wizard_app_port": "48080", "wizard_on": "true"},
+        "参数原样带进任务（布尔归一成 true/false）", _t3.get("params"))
+    # /api/wizard：参数表接口（stub 掉网络层，验证可渲染结构）
+    _, c_wz, _, raw_wz = call("/api/wizard?appname=not-yet-app", reps=1)
+    _wzs = json.loads(raw_wz)
+    chk(c_wz == 200 and isinstance(_wzs.get("fields"), list) and _wzs["fields"]
+        and _wzs["fields"][0].get("field") == "wizard_app_port",
+        "/api/wizard 返回可渲染的参数表", (c_wz, str(_wzs)[:80]))
+    # 未列出白名单的应用：wizard 接口拒绝
+    _, c_wz2, _, _ = call("/api/wizard?appname=definitely-not-listed", reps=1)
+    chk(c_wz2 == 400, "wizard 接口只服务白名单里的应用", c_wz2)
+
+    # ── read_local_fpk_wizard：真读一只临时 fpk（函数级）──
+    import tarfile as _tf
+    _wiz_fpk = os.path.join(tmp, "wiz-probe.fpk")
+    _doc = json.dumps([
+        {"stepTitle": "配置", "items": [
+            {"type": "text", "field": "wizard_app_port", "label": "端口",
+             "initValue": "47939",
+             "rules": [{"required": True, "message": "请填端口"},
+                       {"pattern": "^[0-9]+$", "message": "必须是数字"}]},
+            {"type": "password", "field": "wizard_token", "label": "访问密码", "initValue": ""},
+            {"type": "tips", "helpText": "装完后看帮助"}]}])
+    with _tf.open(_wiz_fpk, "w:gz") as tf:
+        data = _doc.encode("utf-8")
+        ti = _tf.TarInfo("wizard/install"); ti.size = len(data)
+        tf.addfile(ti, io.BytesIO(data))
+        mdata = b"appname = x\nversion = 1.0.0\n"
+        tm = _tf.TarInfo("manifest"); tm.size = len(mdata)
+        tf.addfile(tm, io.BytesIO(mdata))
+    _wf = m.read_local_fpk_wizard(_wiz_fpk)
+    chk(isinstance(_wf, list) and len(_wf) == 3,
+        "read_local_fpk_wizard 读到 3 条（含 tips）", _wf)
+    chk(_wf[0]["field"] == "wizard_app_port" and _wf[0]["initValue"] == "47939"
+        and _wf[0]["rules"][0].get("required") is True,
+        "字段名/初值/规则都保留", _wf[0])
+    chk(_wf[1]["type"] == "password" and _wf[2]["type"] == "tips",
+        "类型原样保留（password / tips）", (_wf[1]["type"], _wf[2]["type"]))
+    _wiz_none = os.path.join(tmp, "wiz-none.fpk")
+    with _tf.open(_wiz_none, "w:gz") as tf:
+        mdata = b"appname = y\nversion = 1.0.0\n"
+        tm = _tf.TarInfo("manifest"); tm.size = len(mdata)
+        tf.addfile(tm, io.BytesIO(mdata))
+    chk(m.read_local_fpk_wizard(_wiz_none) == [],
+        "没有 wizard 成员的包返回 []（不是 None）")
+    chk(m.read_local_fpk_wizard(os.path.join(tmp, "不存在的包.fpk")) is None,
+        "读不了的包返回 None（调用方降级）")
+    _, c_vols, _, raw_vols = call("/api/volumes", reps=1)
+    _vols = json.loads(raw_vols)
+    chk(c_vols == 200 and isinstance(_vols.get("volumes"), list),
+        "/api/volumes 返回存储空间列表", c_vols)
     _, c_dl2, _, raw_dl2 = call("/api/download", {"appname": "not-yet-app"}, reps=1)
-    chk(c_dl2 == 200, "未安装的应用「下载安装包」放行（入队）", c_dl2)
+    chk(c_dl2 == 200, "未安装的应用「下载」仍可单独用（API 层保留）", c_dl2)
 
     # 批量动作跳过未安装的（包是安装用的，单独下载更符合预期）
     with open(os.path.join(var, "last-check.json"), "w", encoding="utf-8") as f:

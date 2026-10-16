@@ -707,6 +707,206 @@ def read_local_fpk_manifest(path, max_members=400):
     raise RuntimeError("本地安装包里没有 manifest")
 
 
+def read_local_fpk_wizard(path, max_members=400):
+    """读本地 fpk 的安装向导定义（``wizard/install`` 成员）。返回字段列表或 None。
+
+    这些字段就是安装时要填的参数（端口、密钥、开关…），安装时以**环境变量**
+    （字段名=变量名）传给应用的 cmd 脚本 —— 实测结论：cleanfnos 的安装回调里
+    就是 ``PORT="${wizard_app_port:-47939}"`` 这种写法消费的。
+    返回 None = 读不到（包结构异常）；返回 [] = 读了，但没有需要填的字段。
+    """
+    import tarfile
+    try:
+        with tarfile.open(path, "r:gz") as tf:
+            for i, m in enumerate(tf):
+                if i > max_members:
+                    break
+                if m.name == "wizard/install" and m.isfile():
+                    f = tf.extractfile(m)
+                    if f is None:
+                        continue
+                    try:
+                        doc = json.loads(f.read().decode("utf-8", "replace"))
+                    except ValueError:
+                        return None
+                    return _wizard_fields(doc)
+    except (tarfile.TarError, OSError, EOFError):
+        return None
+    return []
+
+
+def _wizard_fields(doc):
+    """把 ``wizard/install`` 的 JSON 规整成前端可渲染的字段列表（原样保留顺序）。"""
+    out = []
+    if not isinstance(doc, list):
+        return out
+    for step in doc:
+        if not isinstance(step, dict):
+            continue
+        for it in (step.get("items") or []):
+            if not isinstance(it, dict):
+                continue
+            t = str(it.get("type") or "text")
+            if t == "tips":
+                if it.get("helpText"):
+                    out.append({"type": "tips", "helpText": str(it["helpText"])[:2000]})
+                continue
+            fld = str(it.get("field") or "").strip()
+            if not fld:
+                continue
+            item = {
+                "type": t,
+                "field": fld[:64],
+                "label": str(it.get("label") or fld)[:200],
+                "initValue": str(it["initValue"])[:4096] if it.get("initValue") is not None else "",
+            }
+            if it.get("helpText"):
+                item["helpText"] = str(it["helpText"])[:2000]
+            if isinstance(it.get("options"), list):
+                opts = []
+                for op in it["options"][:64]:
+                    if isinstance(op, dict):
+                        opts.append({"value": str(op.get("value"))[:200],
+                                     "label": str(op.get("label") or op.get("value"))[:200]})
+                    else:
+                        opts.append({"value": str(op)[:200], "label": str(op)[:200]})
+                item["options"] = opts
+            if isinstance(it.get("rules"), list):
+                rules = []
+                for r in it["rules"][:16]:
+                    if not isinstance(r, dict):
+                        continue
+                    rr = {}
+                    if r.get("pattern"):
+                        rr["pattern"] = str(r["pattern"])[:512]
+                    if "min" in r:
+                        rr["min"] = r["min"]
+                    if "max" in r:
+                        rr["max"] = r["max"]
+                    if "required" in r:
+                        rr["required"] = bool(r["required"])
+                    if r.get("message"):
+                        rr["message"] = str(r["message"])[:300]
+                    rules.append(rr)
+                item["rules"] = rules
+            out.append(item)
+    return out
+
+
+# 头部窗口探测用的读取上限：自建仓的打包顺序把 wizard 放在 app.tgz 之前，
+# 768KB 压缩头足够解到它（实测 cliproxyapi 23MB 的包也命中）。
+WIZ_HEAD_BYTES = 768 * 1024
+# 「整包预览下载」上限：读不到向导又不大时，干脆用校验过的下载机把包下下来
+# ——下完就是安装要用的那只包，一举两得。太大就 defer（让用户先下载再填表）。
+WIZ_PREVIEW_LIMIT = 24 * 1024 * 1024
+_WIZ_CACHE = {}
+
+
+def probe_remote_member(url, want, max_bytes=WIZ_HEAD_BYTES):
+    """在远端 fpk 的**头部窗口**里找一条成员（gz 流不能倒读，只试开头）。
+
+    返回成员字节；找不到（成员在后面/窗口不够/网络问题）返回 None。
+    """
+    import zlib
+    try:
+        head = _fetch_head(url, max_bytes)
+    except (urllib.error.URLError, OSError):
+        return None
+    try:
+        d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        raw = d.decompress(head)
+    except zlib.error:
+        return None
+    return _tar_walk_for(raw, want.encode("utf-8") if isinstance(want, str) else want)
+
+
+def wizard_spec_for(app, rel):
+    """给「未安装应用」找安装向导定义（要填的端口/密钥等）。
+
+    来源优先级（每一层都是实测踩出来的）：
+      1. 本地已下载且校验过的包 —— 最权威（就是要装的那只包）；
+      2. 远端包头部窗口 —— 自建仓打包顺序把 wizard 放在 app.tgz 之前时可达；
+         fnpack 顺序（app.tgz 在最先）读不到；
+      3. 仓库源码 at Release tag（raw.githubusercontent 同路径）——
+         实测 360MB 的 ekko-studio 包靠这条也能拿到表单；
+      4. 包 ≤ 24MB：整包预览下载（复用校验/台账/镜像全套下载机；下完即所得）。
+    全部不成 → defer=True（前端改为「先下载、下好再填表安装」）。
+    返回 {fields, source, defer, local_ready}。
+    """
+    key = "%s|%s" % (rel.get("asset_url") or "", rel.get("size") or "")
+    hit = _WIZ_CACHE.get(key)
+    if hit is not None:
+        return dict(hit)
+
+    spec = {"fields": [], "source": "", "defer": False, "local_ready": False}
+
+    # ① 本地已校验的包
+    try:
+        p, _mf = local_package_for(app.get("appname") or "", rel)
+        if p:
+            fl = read_local_fpk_wizard(p)
+            if fl is not None:
+                spec.update(fields=fl, source="local", local_ready=True)
+                _WIZ_CACHE[key] = spec
+                return dict(spec)
+    except Exception:  # noqa: BLE001 - 各层都是尽力而为
+        pass
+
+    # ② 远端头部窗口
+    try:
+        body = probe_remote_member(rel.get("asset_url") or "", "wizard/install")
+        if body:
+            doc = json.loads(body.decode("utf-8", "replace"))
+            spec.update(fields=_wizard_fields(doc), source="remote-head")
+            _WIZ_CACHE[key] = spec
+            return dict(spec)
+    except (ValueError, TypeError):
+        pass
+
+    # ③ 仓库源码 at Release tag
+    repo = str(app.get("repo") or "").strip()
+    tag = str(rel.get("tag") or "").strip()
+    if repo and tag:
+        try:
+            u = "https://raw.githubusercontent.com/%s/%s/wizard/install" % (repo, tag)
+            req = urllib.request.Request(u)
+            req.add_header("User-Agent", "fpk-update/1.0")
+            tok = gh_token()
+            if tok:
+                req.add_header("Authorization", "token %s" % tok)
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+                body = r.read(1 << 20)
+            doc = json.loads(body.decode("utf-8", "replace"))
+            spec.update(fields=_wizard_fields(doc), source="repo")
+            _WIZ_CACHE[key] = spec
+            return dict(spec)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (403, 404):       # 404=仓库没提交 wizard，属正常
+                log("[wizard] 仓库源码读取异常：%s" % exc)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ④ 小包整包预览下载（下完即所得，后面安装直接复用）
+    try:
+        size = int(rel.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if 0 < size <= WIZ_PREVIEW_LIMIT:
+        try:
+            p, _sz, _sha, _mf = _download_package(app, rel, None)
+            fl = read_local_fpk_wizard(p)
+            if fl is not None:
+                spec.update(fields=fl, source="preview-download", local_ready=True)
+                _WIZ_CACHE[key] = spec
+                return dict(spec)
+        except Exception as exc:  # noqa: BLE001
+            log("[wizard] 预览下载失败（按 defer 处理）：%s" % exc)
+
+    spec["defer"] = True
+    _WIZ_CACHE[key] = spec
+    return dict(spec)
+
+
 # ───────────────────────────── 源解析（仓库 / 直链） ─────────────────────────────
 
 def _pick_asset(assets, want_arch=None, pattern=None, strict=False):
@@ -1634,8 +1834,12 @@ def clear_finished_tasks():
     return list_tasks()
 
 
-def enqueue(appname, action):
-    """把一次动作放进队列（后台执行），返回任务 id。重复排队会被合并。"""
+def enqueue(appname, action, volume=None, params=None):
+    """把一次动作放进队列（后台执行），返回任务 id。重复排队会被合并。
+
+    volume / params：仅「完整安装」用 —— 装到哪个存储空间、要填的安装参数
+    （wizard 字段，安装时以环境变量传给应用的 cmd 脚本）。
+    """
     if action not in ACTIONS:
         raise ValueError("未知动作：%s" % action)
     app = _resolve_app(appname)
@@ -1654,7 +1858,7 @@ def enqueue(appname, action):
         _tgt = ""
         if action in ("install", "update"):
             _tgt = str((state_item(appname) or {}).get("latest") or "")
-        d["tasks"].append({
+        rec = {
             "id": tid, "appname": appname, "display": app["display"] or appname,
             "version": (_tgt or None),
             "action": action, "status": "queued", "stage": "queued",
@@ -1662,7 +1866,12 @@ def enqueue(appname, action):
             # 写 0 的话界面会画一条 0% 的空条，看起来像卡住了（实测观感问题）。
             "message": "排队中…", "percent": None,
             "created_at": now_iso(), "updated_at": now_iso(),
-        })
+        }
+        if volume is not None:
+            rec["volume"] = int(volume)
+        if params:
+            rec["params"] = dict(params)
+        d["tasks"].append(rec)
         _save_tasks(d)
         _worker_wake.notify_all()
     return tid
@@ -2077,6 +2286,10 @@ def do_install(tid, appname):
     app = _resolve_app(appname)
     if not app:
         raise RuntimeError("该应用不在列表里")
+    if not installed_version(appname):
+        # 未安装的应用走**完整安装**链路（v1.3）：下载（如需要）→ 应用中心 CLI
+        # 完整安装（含存储空间）。下面这条「就地升级」链路只适用于已安装的应用。
+        return _do_first_install(tid, appname)
     try:
         update_task(tid, stage="checking", message="正在核对本地安装包…")
         rel = resolve_source(app)
@@ -2117,6 +2330,212 @@ def do_install(tid, appname):
                     message="安装完成：%s → %s%s" % (cur, target_ver, note), version=target_ver,
                     path=("" if note else fpk_path), finished_at=now_iso())
         log("[%s] 安装成功 %s -> %s" % (appname, cur, target_ver))
+    finally:
+        _refresh_after_action()
+
+
+def _task_get(tid):
+    """按任务 id 取任务记录（只读快照）。"""
+    with _tasks_lock:
+        for t in _load_tasks()["tasks"]:
+            if t.get("id") == tid:
+                return dict(t)
+    return {}
+
+
+def _cli_error_line(out):
+    """从 appcenter-cli 输出里抓失败原因（[Error] 行）。
+
+    实测坑：install-fpk 失败时**退出码依然是 0**（例：code 10111），
+    所以不能靠 returncode 判成败 —— 判定看结果（installed_version），
+    原因从这行里抓出来给用户看。
+    """
+    for line in reversed((out or "").splitlines()):
+        line = line.strip()
+        if line.startswith("[Error]"):
+            return line[len("[Error]"):].strip()
+    return ""
+
+
+_VOLUME_CACHE = {"at": 0.0, "val": None}
+
+
+def default_volume():
+    """系统默认安装存储空间（应用中心设置里的值）。带 5 分钟缓存。
+
+    读不到就退回本应用自己所在的卷；再不行返回 None（由调用方给出可读报错）。
+    """
+    now = time.monotonic()
+    if _VOLUME_CACHE["val"] is not None and now - _VOLUME_CACHE["at"] < 300:
+        return _VOLUME_CACHE["val"]
+    vol = None
+    try:
+        p = subprocess.run(["appcenter-cli", "default-volume"],
+                           capture_output=True, timeout=30)
+        if p.returncode == 0:
+            txt = (p.stdout or b"").decode("utf-8", "replace").strip()
+            if txt.splitlines():
+                n = int(txt.splitlines()[-1].strip())
+                if 1 <= n <= 99:
+                    vol = n
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    if vol is None:
+        # 退回：本应用自己装在哪一卷（server.py 的路径形如 /volN/@appcenter/...）
+        m = re.search(r"/vol(\d+)/", os.path.realpath(__file__))
+        if m:
+            vol = int(m.group(1))
+    _VOLUME_CACHE.update({"at": now, "val": vol})
+    return vol
+
+
+def list_volumes():
+    """可用于安装的存储空间列表（给前端选择器用）。
+
+    判据：/volN 是**真实挂载点**（fnOS 的存储空间根）。只认 1..99 的标准卷名 ——
+    /vol00、/vol02 这类是系统内部的软链/聚合目录，不是可安装的存储空间。
+    """
+    out = []
+    try:
+        names = os.listdir("/")
+    except OSError:
+        return out
+    for name in sorted(names):
+        m = re.match(r"^vol([1-9]\d?)$", name)
+        if not m:
+            continue
+        n = int(m.group(1))
+        path = "/" + name
+        try:
+            if not os.path.ismount(path):
+                continue
+            st = os.statvfs(path)
+        except OSError:
+            continue
+        out.append({
+            "index": n, "path": path,
+            "free": st.f_bavail * st.f_frsize,
+            "total": st.f_blocks * st.f_frsize,
+        })
+    dv = default_volume()
+    for v in out:
+        v["default"] = (v["index"] == dv)
+    return out
+
+
+def _do_first_install(tid, appname):
+    """【完整安装】：未安装的应用 —— 下载（如需要）→ appcenter-cli 完整安装。
+
+    为什么用 CLI 而不是自己拼 daemon 的 install RPC：install-fpk 就是官方给这条
+    链路留的入口，存储空间选择、向导参数、装完自动启动它全包了（实测：最小应用
+    8.5 秒装好、落到指定存储空间、自动 running）。边界不变：只装**白名单里、
+    还没装**的应用，且永远用**校验过 sha256 的包**。
+    """
+    app = _resolve_app(appname)
+    if not app:
+        raise RuntimeError("该应用不在列表里")
+    fpk_path = None
+    try:
+        update_task(tid, stage="checking", message="正在确认最新版本…")
+        rel = resolve_source(app)
+        if not rel.get("sha256"):
+            raise RuntimeError("这个来源没有 sha256 摘要，出于安全不会安装"
+                               "（可改用仓库来源，GitHub 的 Release 附件一般带 digest）")
+        vol = _task_get(tid).get("volume") or default_volume()
+        if not vol:
+            raise RuntimeError("无法确定安装到哪个存储空间，请在安装对话框里选一个")
+        # 本地已有「就是这一版、且校验过」的包 → 直接复用，不重复下载
+        fpk_path, mf = local_package_for(appname, rel)
+        if fpk_path:
+            update_task(tid, stage="downloaded", percent=100,
+                        message="本地已有校验过的 %s，直接安装（不重复下载）" % rel["version"])
+        else:
+            update_task(tid, stage="downloading", message="正在下载安装包…")
+            fpk_path, _total, _got, mf = _download_package(app, rel, tid)
+        update_task(tid, version=mf["version"], path=fpk_path, stage="installing",
+                    message="正在安装到存储空间 %s（应用中心执行中，请稍候）…" % vol)
+
+        # ── 安装参数（wizard 字段）→ 环境文件（KEY=value 一行一条）──
+        # 实测：`install-fpk -e <文件>` 会把里面的变量注入安装环境，应用的
+        # cmd 脚本按字段名取（如 ${wizard_app_port:-47939}）。
+        # 包里的向导定义是权威名单：不在声明里的字段一律丢弃（参数即环境变量，
+        # 多写就是往安装环境里塞东西）。值不写日志。
+        params = dict(_task_get(tid).get("params") or {})
+        try:
+            declared = read_local_fpk_wizard(fpk_path)
+        except Exception:  # noqa: BLE001
+            declared = None
+        if declared is not None:
+            names = {f["field"] for f in declared if f.get("type") != "tips"}
+            dropped = sorted(set(params) - names)
+            if dropped:
+                log("[%s] 忽略未在包内向导里声明的安装参数：%s"
+                    % (appname, ",".join(dropped)))
+            params = {k: v for k, v in params.items() if k in names}
+        env_file = None
+        if params:
+            import tempfile
+            fd, env_file = tempfile.mkstemp(prefix="fpku-wiz-", suffix=".env", dir=VAR_DIR)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    for k, v in params.items():
+                        f.write("%s=%s\n" % (k, v))
+                os.chmod(env_file, 0o600)
+            except OSError:
+                try:
+                    os.unlink(env_file)
+                except OSError:
+                    pass
+                env_file = None
+            log("[%s] 安装参数：%s（值不落日志）" % (appname, ",".join(sorted(params))))
+        try:
+            # 两个分支都写成**字面量列表**：能力边界门禁靠静态 AST 判定执行了什么，
+            # 用变量拼命令会让它无法检查（这正是那道门禁存在的意义）。
+            if env_file:
+                proc = subprocess.run(
+                    ["appcenter-cli", "install-fpk", fpk_path, "-v", str(int(vol)),
+                     "-e", env_file],
+                    capture_output=True, timeout=1800)
+            else:
+                proc = subprocess.run(
+                    ["appcenter-cli", "install-fpk", fpk_path, "-v", str(int(vol))],
+                    capture_output=True, timeout=1800)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("安装超过 30 分钟仍未结束，已放弃等待"
+                               "（可到应用中心查看进度）")
+        except OSError:
+            raise RuntimeError("找不到 appcenter-cli，无法执行安装")
+        finally:
+            if env_file:
+                try:
+                    os.unlink(env_file)
+                except OSError:
+                    pass
+        # 判成败看**结果**：CLI 失败时退出码也是 0（实测 code 10111）
+        v_now = installed_version(appname)
+        if not v_now:
+            err = _cli_error_line(((proc.stdout or b"") + (proc.stderr or b""))
+                                  .decode("utf-8", "replace"))
+            raise RuntimeError("应用中心没有完成安装%s"
+                               % (("：" + err) if err else ""))
+        # 与升级路径一致：幂等地确认一次启动（通常应用中心装完已经拉起）
+        try:
+            subprocess.run(["appcenter-cli", "start", appname],
+                           capture_output=True, timeout=90)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        note = clean_after_install(appname, fpk_path, mf["version"])
+        if note:
+            fpk_path = ""                 # 已清理，别再当回滚包写在任务里
+        update_task(tid, status="ok", stage="done", percent=100,
+                    message="安装完成：%s（存储空间 %s）%s"
+                            % (norm_version(v_now), vol, note),
+                    version=v_now, path=fpk_path, finished_at=now_iso())
+        log("[%s] 完整安装成功：%s（存储空间 %s，包 %s）"
+            % (appname, norm_version(v_now), vol, rel["asset_name"]))
+    except Exception as exc:  # noqa: BLE001
+        _fail_task(tid, appname, exc, keep_path=fpk_path)
+        return
     finally:
         _refresh_after_action()
 
@@ -3001,6 +3420,34 @@ class Handler(BaseHTTPRequestHandler):
                 "packages": package_summary(),
             })
 
+        if path == "/api/volumes":
+            # 可安装的存储空间列表（完整安装的对话框用它）。
+            # 单独一个接口而不是塞进 /api/state：轮询每 1~10 秒一次，
+            # 卷列表几乎不变，没必要每次轮询都跑一遍 statvfs。
+            return self._json({"ok": True, "volumes": list_volumes(),
+                               "default": default_volume()})
+
+        if path == "/api/wizard":
+            # 未安装应用的安装参数表（端口/密钥等 wizard 字段），给安装对话框渲染表单。
+            # 只允许白名单里的应用 —— 它会触发对 GitHub 的读取（源解析 + 头窗探测/源码/预览下载）。
+            q = parse_qs(urlparse(self.path).query)
+            appname = (q.get("appname") or [""])[0].strip()
+            allowed = {a["appname"] for a in load_whitelist()} | {APP_NAME}
+            if appname not in allowed:
+                return self._err(400, "该应用不在列表里")
+            if installed_version(appname):
+                return self._json({"ok": True, "fields": [], "source": "installed",
+                                   "defer": False, "local_ready": False})
+            app = _resolve_app(appname)
+            try:
+                rel = resolve_source(app)
+            except Exception as exc:  # noqa: BLE001
+                return self._err(400, "无法解析最新版本：%s" % exc)
+            spec = wizard_spec_for(app, rel)
+            spec["ok"] = True
+            spec["latest"] = rel.get("version")
+            return self._json(spec)
+
         if path == "/api/packages":
             items = list_packages()
             fgn = foreign_packages()
@@ -3092,21 +3539,54 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(400, "该应用不在列表里")
             action = path.rsplit("/", 1)[1]
             it = state_item(appname)
-            # 未安装的应用只有「下载安装包」一条路：初次安装要选存储空间、走应用中心
-            # 的安装向导（本应用刻意不代装 —— daemon 的 update 通道是给已装应用就地
-            # 升级用的）。这里必须拦：界面不是唯一调用方，脚本/旧缓存页面都能发请求。
-            if action in ("update", "install") and not installed_version(appname):
-                disp = (it or {}).get("display") or appname
-                return self._err(409, "「%s」还没安装：初次安装需要选存储空间、由应用中心的"
-                                      "安装向导完成。请先点「下载安装包」，再到应用中心手动安装。"
-                                      % disp)
+            # 未安装的应用：只有「安装」（完整安装）一条正路 —— 下载安装包、校验、
+            # 交应用中心装好（可带存储空间参数）。update 语义上只针对已装应用，
+            # 这里拦住并指路（界面不是唯一调用方，脚本/旧缓存页面都能发请求）。
+            volume = None
+            if "volume" in body:
+                try:
+                    volume = int(body.get("volume"))
+                except (TypeError, ValueError):
+                    return self._err(400, "存储空间编号必须是数字")
+                if not 1 <= volume <= 99:
+                    return self._err(400, "存储空间编号超出范围（1–99）")
+            # 安装参数（wizard 字段）：会以**环境变量**写进安装环境，边界收紧 ——
+            # 名字必须是合法变量名（挡注入任意环境变量），值不允许换行
+            # （否则可往 env 文件里再塞一条 KEY=value）。
+            params = None
+            if "params" in body:
+                raw_params = body.get("params")
+                if not isinstance(raw_params, dict):
+                    return self._err(400, "params 必须是 {字段: 值} 形式")
+                params = {}
+                for k, v in raw_params.items():
+                    k = str(k)
+                    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$", k):
+                        return self._err(400, "安装参数名不合法：%r" % k[:40])
+                    if isinstance(v, bool):
+                        v = "true" if v else "false"
+                    v = str(v)
+                    if len(v) > 4096 or "\n" in v or "\r" in v:
+                        return self._err(400, "安装参数「%s」的值不合法（过长或含换行）" % k)
+                    params[k] = v
+            if not installed_version(appname):
+                if action == "update":
+                    return self._err(409, "「%s」还没安装：请点「安装」由本工具完成"
+                                          "完整安装（会先下载并校验安装包）"
+                                          % ((it or {}).get("display") or appname))
+                if action == "install":
+                    try:
+                        tid = enqueue(appname, action, volume=volume, params=params)
+                    except ValueError as exc:
+                        return self._err(400, str(exc))
+                    return self._json({"ok": True, "task": tid, "message": "已加入队列"})
             # 「已是最新就不下载」—— 界面会禁用按钮，但接口也必须拦：
             # 界面不是唯一调用方（脚本、误触、旧缓存页面都能发这个请求）。
             if action in ("download", "update") and not download_needed(it):
                 disp = (it or {}).get("display") or appname
                 if (it or {}).get("uninstalled"):
                     return self._err(409, "「%s」的安装包已经下好了（%s），无需重复下载；"
-                                          "到应用中心手动安装即可"
+                                          "直接点「安装」即可"
                                           % (disp, (it or {}).get("latest") or "?"))
                 return self._err(409, "「%s」已经是最新（%s），无需%s"
                                       % (disp, (it or {}).get("installed") or "?",

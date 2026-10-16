@@ -563,22 +563,22 @@ try {
   console.log(`  ${okRb ? '✔' : '✘'} 换回旧版本（回滚）→ 按钮显示「安装」且可点  -> "${rb.map((b) => b.textContent).join('/')}"`);
   if (!okRb) bad++;
 
-  // ── 未安装的应用（Scheme B）：下包 → 打开应用中心安装，两态自动切换 ──
+  // ── 未安装的应用（v1.3 完整安装）：下包 → 安装，两态自动切换 ──
   const un = mk({ uninstalled: true, installed: null, latest: '1.2',
     update_available: false, relation: 'uninstalled', downloaded: null });
   const unBtns = actBtns(un);
-  const okUn = unBtns.length === 1 && unBtns[0].textContent === '下载安装包'
+  const okUn = unBtns.length === 1 && unBtns[0].textContent === '下载并安装'
     && unBtns[0].disabled === false;
-  console.log(`  ${okUn ? '✔' : '✘'} 未安装（无包）→ 一个「下载安装包」按钮且可点  -> "${unBtns.map((b) => b.textContent).join('/')}"`);
+  console.log(`  ${okUn ? '✔' : '✘'} 未安装（无包）→ 一个「下载并安装」按钮且可点  -> "${unBtns.map((b) => b.textContent).join('/')}"`);
   if (!okUn) bad++;
 
   const unReady = mk({ uninstalled: true, installed: null, latest: '1.2',
     update_available: false, relation: 'uninstalled',
     downloaded: { version: '1.2', complete: true } });
   const unR = actBtns(unReady);
-  const okUnR = unR.length === 1 && unR[0].textContent === '打开应用中心安装'
+  const okUnR = unR.length === 1 && unR[0].textContent === '安装'
     && unR[0].disabled === false;
-  console.log(`  ${okUnR ? '✔' : '✘'} 未安装（包已就绪）→ 按钮切为「打开应用中心安装」  -> "${unR.map((b) => b.textContent).join('/')}"`);
+  console.log(`  ${okUnR ? '✔' : '✘'} 未安装（包已就绪）→ 按钮切为「安装」  -> "${unR.map((b) => b.textContent).join('/')}"`);
   if (!okUnR) bad++;
 
   // 未安装 + 无摘要（error）且没包 → 下载按钮必须禁用（拿不到校验依据）
@@ -589,13 +589,13 @@ try {
   console.log(`  ${okUnErr ? '✔' : '✘'} 未安装 + 没有 sha256 → 按钮禁用（不能不校验就下）`);
   if (!okUnErr) bad++;
 
-  // 未安装的状态文案：说清「包已下好 + 去哪里装」，且不出现「已装」这种误导
+  // 未安装的状态文案：说清「包已下好 + 点安装」，且不出现「已装」这种误导
   try {
     const card = sandbox.__renderCard(unReady);
     let txt = '';
     (function w(n) { if (n.textContent) txt += String(n.textContent) + '|'; (n.children || []).forEach(w); })(card);
-    const okTxt = txt.includes('安装包已下好') && txt.includes('打开应用中心安装') && !txt.includes('已装');
-    console.log(`  ${okTxt ? '✔' : '✘'} 未安装卡片文案：说清「包已下好 + 去哪里装」，且不写「已装」`);
+    const okTxt = txt.includes('安装包已下好') && txt.includes('点「安装」') && !txt.includes('已装');
+    console.log(`  ${okTxt ? '✔' : '✘'} 未安装卡片文案：说清「包已下好 + 点安装」，且不写「已装」`);
     if (!okTxt) bad++;
   } catch (e) {
     console.log('  ✘ 未安装卡片渲染抛异常 -> ' + e.message);

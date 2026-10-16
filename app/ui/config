@@ -7,7 +7,6 @@
       "protocol": "http",
       "port": "18600",
       "url": "/",
-      "microApp": true,
       "allUsers": true
     }
   }

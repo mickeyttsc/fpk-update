@@ -232,14 +232,36 @@ socket：`/var/run/com.trim.app.center.sock`（`root:root`，组 `OfficialAppUse
   （`_read_body` 幂等缓存，按请求在 `handle_one_request` 里重置缓存），任何路由漏读都不再
   可能出问题；`Transfer-Encoding` 与非法 Content-Length 一律断开连接。回归测试在
   `verify-endpoint-latency.py` 里用同一连接连发「清理 → 设置 → state」复现原场景。
-- **未安装应用（Scheme B）与桌面桥（microApp）**：未安装的仓库也能加进列表（可下载、
-  不可经本工具「更新/安装」——守护在 `/api/update|install` 路由层）；`/api/all` 批量跳过
-  未安装的应用。要「一键唤起应用中心」，本应用的 `ui/config` 需开 `"microApp": true`
-  ——桌面会给带此标记的 iframe 装上 Penpal 桥（父端 methods 里有 `openApp` 等），
-  前端按 `syn → synAck → ack → call('openApp', ['trim.app-center'])` 即可唤起应用中心的
-  窗口；两个坑：①握手要在**窗口打开后 60 秒内**完成——父端超时会**销毁连接**，所以必须
-  在页面 boot 时就 `syn`，不能等用户点按钮；②桥只在高版本桌面里存在，超时降级为文字
-  指引（「应用中心 → 手动安装 → 从 NAS 选包」），绝不把「没唤起」当失败。
+- **未安装应用的完整安装（v1.3，取代了跳转方案）**：未安装的仓库也能加进列表，
+  点「下载并安装」→ 选存储空间 → 后台一条龙：下载 → 校验 sha256 →
+  `appcenter-cli install-fpk <包> -v <卷号>` → 自动启动。`/api/all` 批量跳过未安装的
+  应用（它的包是「安装用」不是「升级用」）。关键实测（都踩过）：
+  · `-v` 的「volume index」就是**卷号**（default-volume 返回 2 = /vol2，实测 -v 2 落 vol2）；
+  · **install-fpk 失败时退出码依然是 0**（实例：code 10111 文件不合法）——判成败只能看
+    结果（`installed_version`），原因从输出里的 `[Error]` 行抓；
+  · 装完**会自动启动**（实测 status=running），无需再 start；卸载用
+    `appcenter-cli uninstall <app>`（@appdata 会保留，和界面卸载一致）；
+  · 手搓的 fpk 中间包会被拒（10111），测试包要用官方 `fnpack build` 产出；
+  · 曾调研「从应用内唤起应用中心窗口」的桌面桥方案：需要外层 manifest `micro_app = true`
+    （实测 entry/appcenter 两库的 micro_app 列都来自它）＋ Penpal 握手
+    （syn → synAck → ack → call('openApp')，且握手要在窗口打开 60 秒内完成，
+    否则父端销毁连接）。**因手机端没有桌面环境、跳转不可达，已放弃**（代码已移除），
+    改成本节的完整安装；此段留作以后需要桌面桥时的速查。
+- **安装参数（wizard 字段：端口/密钥等）速查**（全部实测）：
+  · 定义在 fpk 的 `wizard/install` 成员（JSON 数组）：字段 `type` ∈
+    text/password/radio/checkbox/select/switch/tips，带 `field`（=环境变量名）、
+    `label`、`initValue`、`rules`（required/pattern/min/max + message）；
+  · 值的流向：`install-fpk -e <文件>` 注入安装环境 —— 文件是 **KEY=value 一行一条**，
+    应用的 cmd 脚本按字段名取（cleanfnos 里就是 `PORT="${wizard_app_port:-47939}"`），
+    实测 install_callback 的 env 里能收到 `wizard_hello_port=23456`；
+  · 读参数表要在**下载之前**（对话框要用），四层来源：本地已校验包 → 远端 gz 头窗
+    768KB 里的成员走读 → `raw.githubusercontent.com/<repo>/<tag>/wizard/install`
+    → ≤24MB 整包预览下载（下完即所得、安装直接复用）。fnpack 顺序（app.tgz 最前）
+    会挡住头窗，靠后两层；
+  · 安全边界：参数名必须匹配 `[A-Za-z_][A-Za-z0-9_]{0,63}`（挡环境变量注入）、
+    值不许含换行（挡往 env 文件里再塞一条）、安装时以**包内声明**为白名单做二次过滤；
+  · AST 门禁要求 subprocess 第一个参数是**字面量列表** → 带 `-e` 与不带 `-e`
+    写成两个分支的调用（拼变量会让门禁无法静态判定）。
 
 ## 打包者
 

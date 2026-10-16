@@ -70,96 +70,6 @@ async function api(path, opts = {}) {
   return data;
 }
 
-/* ── 飞牛桌面桥（微应用通道）──
-   让「打开应用中心安装」能真的把桌面上的应用中心窗口唤起来。
-   协议是飞牛桌面自带的双向 RPC（Penpal 同款）：
-     syn → synAck（父端回）→ ack（我们回）→ call/reply（我们调父端的 openApp 方法）。
-   只在「被桌面以微应用方式嵌入」时可用（ui/config 的 microApp:true）；
-   页面被独立浏览器打开、或桌面桥超时，全部走文字指引降级，不影响其他功能。 */
-const DesktopBridge = (() => {
-  let promise = null;                 // 惰性连接，只连一次
-  let seq = 0;
-  function connect() {
-    if (promise) return promise;
-    promise = new Promise((resolve) => {
-      if (!window.parent || window.parent === window) { resolve(null); return; }
-      let settled = false;
-      const finish = (v) => {
-        if (settled) return;
-        settled = true;
-        window.removeEventListener('message', onMsg);
-        clearTimeout(timer);
-        resolve(v);
-      };
-      const timer = setTimeout(() => finish(null), 2000);
-      function onMsg(ev) {
-        const d = ev.data;
-        if (!d || typeof d !== 'object') return;
-        if (ev.source !== window.parent) return;          // 只认父窗口的应答
-        if (d.penpal !== 'synAck') return;
-        // 回 ACK 完成握手（methodNames 必填：我们不给桌面提供可调方法）
-        try {
-          window.parent.postMessage(
-            { penpal: 'ack', id: d.id, appName: d.appName, methodNames: [] }, '*');
-        } catch (e) { finish(null); return; }
-        finish({
-          call(method, args) {
-            return new Promise((res, rej) => {
-              const id = 'fpku-' + (++seq);
-              const tm = setTimeout(() => {
-                window.removeEventListener('message', onReply);
-                rej(new Error('桌面没有响应'));
-              }, 1500);
-              function onReply(re) {
-                const r = re.data;
-                if (re.source !== window.parent) return;
-                if (!r || typeof r !== 'object' || r.penpal !== 'reply' || r.id !== id) return;
-                clearTimeout(tm);
-                window.removeEventListener('message', onReply);
-                if (r.resolution === 'fulfilled') res(r.returnValue);
-                else rej(new Error('桌面拒绝了这次调用'));
-              }
-              window.addEventListener('message', onReply);
-              try {
-                window.parent.postMessage(
-                  { penpal: 'call', id, methodName: method, args: args || [] }, '*');
-              } catch (e) {
-                clearTimeout(tm);
-                window.removeEventListener('message', onReply);
-                rej(e);
-              }
-            });
-          },
-        });
-      }
-      window.addEventListener('message', onMsg);
-      try {
-        window.parent.postMessage({ penpal: 'syn', id: 'fpku-syn' }, '*');
-      } catch (e) { finish(null); }
-    });
-    return promise;
-  }
-  return { connect };
-})();
-
-/* 打开飞牛桌面的「应用中心」窗口（用于未安装应用的初次安装引导）。
-   成功唤起 → 告诉用户下一步怎么点；桥不可用 → 给纯文字指引。两者都不算失败。 */
-async function openAppCenter() {
-  const bridge = await DesktopBridge.connect();
-  if (!bridge) {
-    toast('请到飞牛桌面打开「应用中心」→ 手动安装 → 从 NAS 里选下载好的安装包', '', 7000);
-    return false;
-  }
-  try {
-    await bridge.call('openApp', ['trim.app-center']);
-    toast('已打开应用中心：点「手动安装」→ 从 NAS 选择下载好的安装包', 'ok', 7000);
-    return true;
-  } catch (e) {
-    toast('没能自动打开应用中心（' + e.message + '），请手动打开：应用中心 → 手动安装', 'err', 7000);
-    return false;
-  }
-}
-
 /* ── Toast ── */
 function toast(msg, kind = '', ms = 4200) {
   const el = document.createElement('div');
@@ -355,7 +265,7 @@ function versionRow(app) {
 
 /* 静态状态行：只在"本地有包"这类需要你知道的时候出现，且只有一条 */
 function staticState(app) {
-  // 未安装的应用：说清「包在不在本地、下一步怎么装」——初次安装必须走应用中心
+  // 未安装的应用：说清「包在不在本地、点哪个按钮装」——安装由本工具一条龙完成
   if (app.uninstalled) {
     const done = !!(app.downloaded && app.downloaded.complete);
     const lu = app.local_unknown;
@@ -363,12 +273,12 @@ function staticState(app) {
     let text;
     if (done) {
       text = '安装包已下好：' + app.downloaded.version + '（' + fmtSize(app.downloaded.size)
-        + '）—— 点「打开应用中心安装」去装它';
+        + '）—— 点「安装」并选个存储空间即可';
     } else if (lu) {
       text = '本地同名文件' + (lu.reason ? '：' + lu.reason : '与这一版不一致')
-        + '（' + fmtSize(lu.size) + '）—— 点「下载安装包」会重新取一份覆盖它';
+        + '（' + fmtSize(lu.size) + '）—— 点「下载并安装」会重新取一份覆盖它';
     } else {
-      text = '初次安装由应用中心完成（装好后本工具自动接管更新与回滚）';
+      text = '点「下载并安装」：自动下载、校验 sha256，再由应用中心装好并启动';
     }
     const row = el('div', 'c-state ' + cls);
     row.appendChild(el('span', 'c-state-ico', done ? '↓' : (lu ? '!' : '·')));
@@ -470,16 +380,15 @@ function renderCard(app) {
      换版本回滚（钉了旧版本、没新版可升）时按钮显示为「安装」，走同一条路。 */
   const actions = el('div', 'c-actions');
 
-  /* 未安装的应用（Scheme B）：只有一条路 —— 先下包，再到应用中心装。
-     按钮随状态自动切换：没包 →「下载安装包」；有包 →「打开应用中心安装」（桌面桥跳转）。 */
+  /* 未安装的应用（v1.3 完整安装）：按钮随包状态自动切换，点它弹「存储空间选择」。
+     没包 →「下载并安装」（一条龙：下载→校验→应用中心装好）；
+     有包 →「安装」（复用已校验的包，不重复下载）。 */
   if (app.uninstalled) {
     const ready = !!(app.downloaded && app.downloaded.complete);
-    const b = btn(ready ? '打开应用中心安装' : '下载安装包', 'primary sm',
-      ready ? () => openAppCenter()
-            : () => doAction(app, 'download', '下载安装包'),
-      ready ? '唤起桌面上的应用中心，到「手动安装」里选这个包'
-            : (app.latest ? ('把 ' + app.latest + ' 的安装包下到本地并校验 sha256')
-                          : '暂无可用版本'));
+    const b = btn(ready ? '安装' : '下载并安装', 'primary sm',
+      () => doFirstInstall(app, ready),
+      ready ? '用本地已校验的安装包完成安装（可先选存储空间）'
+            : '先下载并校验安装包，再由应用中心完成安装（可先选存储空间）');
     b.disabled = busy || !app.latest || (!!app.error && !ready);
     actions.appendChild(b);
     card.appendChild(actions);
@@ -1167,7 +1076,8 @@ const ENDPOINT = {
 /* 应用内确认弹窗 —— 替代浏览器原生 confirm。
    为什么自己做：原生弹窗是浏览器样式（方角、系统字体、不跟随应用深浅色），
    嵌在飞牛应用小窗里跟应用不是一套东西。
-   返回 Promise<boolean>：确定 true、取消/Esc/点遮罩 false。 */
+   返回 Promise<boolean>：确定 true、取消/Esc/点遮罩 false。
+   o.selects：可选的下拉项。确认时会把 {id: 选中值} 交给 o.onOk（先于 resolve）。 */
 function askDialog(opt) {
   const o = opt || {};
   return new Promise((resolve) => {
@@ -1194,6 +1104,93 @@ function askDialog(opt) {
       });
       body.appendChild(li);
     });
+    /* 表单字段（安装参数 + 存储空间都用它）：text / password / select / radio /
+       checkbox / switch / tips。规则校验（required/pattern/min/max）在这里就地做，
+       不通过就不关窗。用原生控件：手机端会调起系统键盘/选择器，比自绘好点。 */
+    const fieldEls = [];
+    (o.fields || []).forEach((f) => {
+      const type = f.type || 'text';
+      if (type === 'tips') {
+        const d = document.createElement('div');
+        d.className = 'cf-dim';
+        d.textContent = String(f.helpText || '');
+        body.appendChild(d);
+        return;
+      }
+      const wrap = document.createElement('div');
+      wrap.className = 'cf-field';
+      const lab = document.createElement('label');
+      lab.className = 'cf-field-label';
+      lab.textContent = String(f.label || f.id || '');
+      let getVal;
+      if (type === 'select') {
+        const sel = document.createElement('select');
+        (f.options || []).forEach((op) => {
+          const oe = document.createElement('option');
+          oe.value = String(op.value);
+          oe.textContent = String(op.label);
+          sel.appendChild(oe);
+        });
+        if (f.value !== undefined && f.value !== null) sel.value = String(f.value);
+        wrap.appendChild(lab);
+        wrap.appendChild(sel);
+        getVal = () => sel.value;
+      } else if (type === 'radio') {
+        const box = document.createElement('div');
+        box.className = 'cf-radio-box';
+        const radios = [];
+        (f.options || []).forEach((op, i) => {
+          const rl = document.createElement('label');
+          rl.className = 'cf-radio';
+          const r = document.createElement('input');
+          r.type = 'radio';
+          r.name = 'cfr-' + f.id;
+          r.value = String(op.value);
+          if ((f.value !== undefined && String(f.value) === String(op.value))
+              || (f.value === undefined && i === 0)) r.checked = true;
+          rl.appendChild(r);
+          rl.appendChild(document.createTextNode(' ' + String(op.label)));
+          box.appendChild(rl);
+          radios.push(r);
+        });
+        wrap.appendChild(lab);
+        wrap.appendChild(box);
+        getVal = () => {
+          const hit = radios.find((r) => r.checked);
+          return hit ? hit.value : '';
+        };
+      } else if (type === 'checkbox' || type === 'switch') {
+        // 勾选类：label 就在勾选框旁边，不再单独占一行
+        const rl = document.createElement('label');
+        rl.className = 'cf-check';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = String(f.value || f.initValue || '') === 'true';
+        rl.appendChild(cb);
+        rl.appendChild(document.createTextNode(' ' + String(f.label || f.id || '')));
+        wrap.appendChild(rl);
+        getVal = () => (cb.checked ? 'true' : 'false');
+      } else {
+        const inp = document.createElement('input');
+        inp.type = (type === 'password') ? 'password' : 'text';
+        if (f.value !== undefined && f.value !== null) inp.value = String(f.value);
+        else if (f.initValue !== undefined) inp.value = String(f.initValue);
+        wrap.appendChild(lab);
+        wrap.appendChild(inp);
+        getVal = () => inp.value;
+      }
+      if (f.helpText) {
+        const h = document.createElement('div');
+        h.className = 'cf-field-help';
+        h.textContent = String(f.helpText);
+        wrap.appendChild(h);
+      }
+      const err = document.createElement('div');
+      err.className = 'cf-field-err hidden';
+      wrap.appendChild(err);
+      body.appendChild(wrap);
+      fieldEls.push({ id: f.id, rules: f.rules || [], getVal, err });
+    });
     (o.notes || []).forEach((t) => {
       const d = document.createElement('div');
       d.className = 'cf-dim';
@@ -1208,7 +1205,49 @@ function askDialog(opt) {
     modal.classList.remove('hidden');
     if (ok.focus) ok.focus();
 
-    const onOk = () => done(true);
+    /* 按字段自带的 rules 做校验：required / pattern / min/max。
+       min/max 的含义按值自适应：全数字 → 数值范围（端口那类）；否则按字符长度
+       （密码那类）—— 两边的真实用例分别是 1-65535 与 4-64。 */
+    const checkField = (felt) => {
+      const v = felt.getVal();
+      for (const r of felt.rules) {
+        const msg = r.message || '输入不合法';
+        if (r.required && !String(v).trim()) { felt.err.textContent = msg; return false; }
+        if (r.pattern) {
+          let re = null;
+          try { re = new RegExp(r.pattern); } catch (e) { re = null; }
+          if (re && !re.test(String(v))) { felt.err.textContent = msg; return false; }
+        }
+        if (r.min !== undefined && r.min !== null && String(v) !== '') {
+          const numeric = /^\d+$/.test(String(v));
+          const nv = numeric ? parseInt(v, 10) : String(v).length;
+          if (nv < Number(r.min)) { felt.err.textContent = msg; return false; }
+        }
+        if (r.max !== undefined && r.max !== null && String(v) !== '') {
+          const numeric = /^\d+$/.test(String(v));
+          const nv = numeric ? parseInt(v, 10) : String(v).length;
+          if (nv > Number(r.max)) { felt.err.textContent = msg; return false; }
+        }
+      }
+      return true;
+    };
+    const readValues = () => {
+      const v = {};
+      fieldEls.forEach((felt) => { v[felt.id] = felt.getVal(); });
+      return v;
+    };
+    const onOk = () => {
+      let okAll = true;
+      fieldEls.forEach((felt) => {
+        const good = checkField(felt);
+        felt.err.classList.toggle('hidden', good);
+        if (!good) okAll = false;
+      });
+      if (!okAll) return;              // 校验没过不关窗，让用户改
+      // 选择值交给调用方（只有确认才给；取消时什么都不给）
+      if (o.onOk) { try { o.onOk(readValues()); } catch (e) { /* 调用方自己兜 */ } }
+      done(true);
+    };
     const onNo = () => done(false);
     const onBg = (ev) => { if (ev.target === modal) done(false); };
     const onKey = (ev) => {
@@ -1271,6 +1310,118 @@ async function doAction(app, action, label) {
   try {
     const r = await api(ENDPOINT[action], { method: 'POST', body: { appname: app.appname } });
     toast('已加入后台队列（' + label + '），可以关掉页面');
+    await refresh();
+    startPoll();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+
+/* 未安装应用的**完整安装**：选存储空间 + 填安装参数（端口/密钥等向导字段）→
+   入队「安装」（后端：下载→校验→应用中心装好并拉起）。
+   参数表从 /api/wizard 取：本地有包读本地包，没有就远端头窗/仓库源码/小包预览。 */
+let firstInstallBusy = false;      // 防双击：取参数表可能要 1~3 秒，期间按钮还在
+async function doFirstInstall(app, pkgReady) {
+  if (firstInstallBusy) return;
+  firstInstallBusy = true;
+  try {
+    return await _doFirstInstallJob(app, pkgReady);
+  } finally {
+    firstInstallBusy = false;
+  }
+}
+
+async function _doFirstInstallJob(app, pkgReady) {
+  let vols = [];
+  let defVol = null;
+  try {
+    const r = await api('/api/volumes');
+    vols = r.volumes || [];
+    defVol = r.default;
+  } catch (e) {
+    toast('无法获取存储空间列表：' + e.message, 'err');
+    return;
+  }
+  if (!vols.length) {
+    toast('系统里没有可用于安装的存储空间', 'err');
+    return;
+  }
+  let wz = null;
+  try {
+    wz = await api('/api/wizard?appname=' + encodeURIComponent(app.appname));
+  } catch (e) {
+    toast('读取安装参数失败：' + e.message, 'err');
+    return;
+  }
+  // 包太大且读不到参数表 → 先下载；下好后卡片按钮变「安装」，那时本地包在手，
+  // 参数表一定读得到（本地包是权威来源），再填表和安装。
+  if (wz && wz.defer) {
+    const okDl = await askDialog({
+      title: '先下载「' + (app.display || app.appname) + '」的安装包',
+      rows: [[['版本', app.latest || '?'], ['大小', app.size ? fmtSize(app.size) : '—']]],
+      notes: ['这个安装包比较大，先把它下载并校验。下好后回到卡片点「安装」，'
+        + '如果该应用需要填参数（端口、密钥等），届时会显示表单。'],
+      okText: '先下载',
+    });
+    if (!okDl) return;
+    try {
+      await api('/api/download', { method: 'POST', body: { appname: app.appname } });
+      toast('已加入后台队列（下载），可以关掉页面');
+      await refresh();
+      startPoll();
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+    return;
+  }
+  // 组装表单：向导字段（原顺序）+ 存储空间
+  const fields = (wz && wz.fields ? wz.fields : []).map((x) => {
+    if (x.type === 'tips') return { type: 'tips', helpText: x.helpText };
+    return {
+      type: x.type || 'text', id: x.field, label: x.label || x.field,
+      value: x.initValue !== undefined ? x.initValue : '',
+      helpText: x.helpText, options: x.options, rules: x.rules,
+    };
+  });
+  fields.push({
+    type: 'select', id: '__volume', label: '安装到',
+    value: String(defVol != null ? defVol : vols[0].index),
+    options: vols.map((v) => ({
+      value: String(v.index),
+      label: '存储空间 ' + v.index + '（剩余 ' + fmtSize(v.free) + '）'
+        + (v.index === defVol ? ' · 默认' : ''),
+    })),
+  });
+  const localReady = pkgReady || !!(wz && wz.local_ready);
+  let chosen = null;
+  let params = {};
+  const okGo = await askDialog({
+    title: (localReady ? '安装「' : '下载并安装「') + (app.display || app.appname) + '」',
+    rows: [[['版本', (app.latest || '?') + (app.size ? '（' + fmtSize(app.size) + '）' : '')]]],
+    fields,
+    notes: [
+      localReady ? '本地已有校验过的安装包，直接安装，不重复下载。'
+                 : '会先下载安装包并校验 sha256，然后执行安装。',
+      '由飞牛应用中心完成安装（约需片刻），装好后应用会自动启动；'
+        + '数据保存在所选存储空间上。',
+    ],
+    okText: '安装',
+    onOk: (vals) => {
+      chosen = parseInt(vals.__volume, 10);
+      params = {};
+      Object.keys(vals).forEach((k) => {
+        if (k !== '__volume') params[k] = vals[k];
+      });
+    },
+  });
+  if (!okGo) return;
+  if (!chosen || isNaN(chosen)) { toast('没有选存储空间，已取消', ''); return; }
+  try {
+    await api('/api/install', {
+      method: 'POST',
+      body: { appname: app.appname, volume: chosen, params },
+    });
+    toast('已加入后台队列（安装到存储空间 ' + chosen + '），可以关掉页面');
     await refresh();
     startPoll();
   } catch (e) {
@@ -1649,7 +1800,7 @@ $('app-preview-btn').addEventListener('click', async () => {
       r.installed
         ? (r.update_available ? ('可以更新：' + r.installed_version + ' → ' + r.version)
                               : ('当前已是最新（' + r.installed_version + '）'))
-        : ('本机未安装：可添加后先下载安装包，再到应用中心完成初次安装'),
+        : ('本机未安装：添加后可在卡片里直接安装（自动下载、校验并由应用中心装好）'),
     ].join('\n');
   } catch (e) {
     box.textContent = '✕ ' + e.message;
@@ -1675,7 +1826,7 @@ $('app-confirm-btn').addEventListener('click', async () => {
         body: { source: picker.source, tag: p.tag, asset: p.asset },
       });
       toast('已加入 ' + (r.appname || '')
-        + (r.installed === false ? '（本机未安装：可在卡片里先下载安装包）' : ''), 'ok', 6500);
+        + (r.installed === false ? '（本机未安装：可在卡片里直接安装）' : ''), 'ok', 6500);
       $('app-add-input').value = '';
     }
     $('app-picker').classList.add('hidden');
@@ -1739,10 +1890,6 @@ $('self-repo-save').addEventListener('click', async () => {
 
 /* ── 启动 ── */
 (async function boot() {
-  // 桌面桥要**开机就握手**，不能等用户点「打开应用中心安装」时才连：
-  // 桌面父端在 60 秒内等不到握手会销毁连接（之后本窗口再也连不上），
-  // 而用户点按钮往往在一分钟以后（实测路径）。失败也无妨，静默即可。
-  DesktopBridge.connect();
   try {
     await refresh();
     startPoll();

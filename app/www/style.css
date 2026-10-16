@@ -648,6 +648,22 @@ code {
 }
 .cf-body .cf-li { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
 .cf-body .cf-li > span:last-child { color: var(--fg-muted); flex: none; }
+
+/* ── 安装对话框里的表单字段（向导参数 / 存储空间）── */
+.cf-field { margin-top: 10px; }
+.cf-field-label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 5px; }
+.cf-field input[type="text"], .cf-field input[type="password"], .cf-field select {
+  width: 100%; box-sizing: border-box; padding: 9px 11px; font: inherit; font-size: 13.5px;
+  border-radius: 9px; border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+}
+.cf-field input:focus, .cf-field select:focus { outline: none; border-color: var(--accent); }
+.cf-field-help { font-size: 11.5px; color: var(--fg-muted); margin-top: 4px; line-height: 1.6; }
+.cf-field-err { font-size: 12px; color: var(--err); margin-top: 4px; }
+.cf-field-err.hidden { display: none; }
+.cf-radio-box { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.cf-radio, .cf-check { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; cursor: pointer; }
+.cf-check { margin-top: 2px; }
+.cf-radio input, .cf-check input { width: 16px; height: 16px; accent-color: var(--accent); }
 .cf-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 @media (max-width: 700px) {
   .cf-actions .btn { flex: 1; }        /* 手机上按钮等分，好点 */

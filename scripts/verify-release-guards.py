@@ -133,6 +133,15 @@ def main():
         (js, "function renderSelf", "界面把自身画成列表上方独立的一块"),
         (js, "api('/api/self/update'", "自身更新按钮打的是自身接口（不是列表接口）"),
         (js, "  renderSelf(s);", "render() 里真的画了那一块"),
+        # ── v1.3 完整安装 / 安装参数 ──
+        (srv, "def _do_first_install", "首次完整安装的实现（未安装的应用在这里装）"),
+        (srv, "install-fpk", "走应用中心 CLI 的完整安装链路"),
+        (srv, "def _cli_error_line", "CLI 失败原因从输出里抓（退出码是 0，不能靠它）"),
+        (srv, "def wizard_spec_for", "安装参数表的四层来源（本地/头窗/仓库/预览下载）"),
+        (srv, "def read_local_fpk_wizard", "从本地包里读向导定义"),
+        (srv, "def default_volume", "系统默认安装卷（读 appcenter-cli default-volume）"),
+        (js, "function doFirstInstall", "前端完整安装流程（参数表 + 存储空间 + 入队）"),
+        (js, "cf-field-err", "安装对话框的字段级校验错误提示"),
     ]
     print("▸ 修复点必须还在（%d 项）" % len(REQUIRED))
     for text, needle, label in REQUIRED:

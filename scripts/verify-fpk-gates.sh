@@ -188,7 +188,11 @@ grep -q 'btn-spin' "$TMP/www/style.css" || fail "CSS 缺少转圈动画"
 grep -q 'GitHub 上 fpk 的下载更新器' "$TMP/manifest" || fail "manifest 缺少一句话定位"
 grep -q 'GitHub 上 fpk 的下载更新器' "$TMP/wizard/install" || fail "安装向导缺少一句话定位"
 grep -q '安装永远由你点' "$TMP/manifest" || fail "manifest 缺少「安装永远由你点」这条边界"
-grep -q '应用中心安装' "$TMP/manifest" || fail "manifest 缺少「初次安装走应用中心」这条底线（Scheme B：可下包、不代装）"
+grep -q '完整安装' "$TMP/manifest" || fail "manifest 缺少「完整安装」这条能力（v1.3 起）"
+# 完整安装链路必须在（缺了就是功能回退：未安装的应用没法装了）
+grep -q 'install-fpk' "$TMP/bin/server.py" || fail "后端缺少完整安装链路（appcenter-cli install-fpk）"
+grep -q '/api/install/wizard\|/api/wizard' "$TMP/bin/server.py" || fail "后端缺少安装参数表接口（/api/wizard）"
+grep -q 'read_local_fpk_wizard' "$TMP/bin/server.py" || fail "后端缺少读向导定义的实现（read_local_fpk_wizard）"
 # 自审修的那几条也要钉住（否则以后会被改回去）
 grep -q 'Cache-Control' "$TMP/bin/server.py" || fail "静态资源缺少 no-cache（升级后可能用旧界面）"
 grep -q 'AUTO_DL_RETRY_SEC' "$TMP/bin/server.py" || fail "自动下载缺少重试退避（坏包会被反复重试）"

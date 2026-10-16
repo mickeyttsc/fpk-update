@@ -7,11 +7,13 @@
 grep 会把这个警告本身当成违规。判据必须落在「实际调用了什么」上。
 
 本脚本断言两条硬边界：
-  1. 所有 subprocess 调用只允许 `appcenter-cli status <app>` 与
-     `appcenter-cli start <app>` —— 即：只能查询状态、只能拉起应用。
+  1. 所有 subprocess 调用只允许 appcenter-cli 的四个子命令 ——
+     status / start（查状态、拉起应用）、install-fpk（完整安装，
+     只用于白名单里尚未安装的应用、且包必须已校验 sha256）、
+     default-volume（只读：系统默认安装卷）。
+     没有卸载、没有删除、没有 install-local。
   2. 所有 daemon_call 的路由只允许升级通道那 5 条 ——
      暂存 / 暂存状态 / 升级前检查 / 升级提交 / 任务状态。
-     没有安装、没有卸载、没有删除。
 
 用法：python3 scripts/verify-server-safety.py <server.py>
 """
@@ -22,6 +24,8 @@ import sys
 ALLOWED_SUBPROCESS = {
     ("appcenter-cli", "status"),
     ("appcenter-cli", "start"),
+    ("appcenter-cli", "install-fpk"),     # 首次完整安装（v1.3）
+    ("appcenter-cli", "default-volume"),  # 只读：读系统默认安装卷
 }
 
 ALLOWED_ROUTES = {
