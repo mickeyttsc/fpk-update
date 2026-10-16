@@ -646,6 +646,7 @@ function renderSelf(s) {
   const it = s.self;
   if (!it) { box.classList.add('hidden'); return; }   // 还没检测过：这一块先不出现
   box.classList.remove('hidden');
+  box.classList.toggle('has-update', !!it.update_available);
 
   const task = taskFor(it.appname);
   const running = !!(task && (task.status === 'running' || task.status === 'queued'));
@@ -689,6 +690,7 @@ function renderSelf(s) {
   const b = $('sb-update');
   if (b) {
     b.hidden = !newer;
+    b.classList.toggle('hidden', !newer);
     b.disabled = running || !newer;
     b.title = newer ? ('更新到 ' + latest + '（会重启本应用，装完页面自动刷新）') : '';
   }

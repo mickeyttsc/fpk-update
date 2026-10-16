@@ -63,7 +63,7 @@ body {
   -webkit-font-smoothing: antialiased;
   min-height: 100vh;
 }
-.hidden { display: none !important; }
+.hidden, [hidden], .btn[hidden], .btn.hidden { display: none !important; }
 .muted { color: var(--fg-muted); }
 code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -147,6 +147,11 @@ code {
   background: var(--bg-soft); box-shadow: var(--shadow);
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
   margin-left: 16px; margin-right: 16px;
+  transition: border-color .18s, background .18s;
+}
+.selfbar.has-update {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-soft));
 }
 @media (min-width: 1272px) {
   .selfbar { margin-left: auto; margin-right: auto; }
@@ -472,26 +477,50 @@ code {
 
 /* ── 手机端适配 ── */
 @media (max-width: 700px) {
+  /* 顶栏（模块1）：手机端统一正方触控按钮，标题更清爽 */
   .topbar { padding: 10px max(13px, env(safe-area-inset-left)) 10px max(13px, env(safe-area-inset-right)); }
   .brand { min-width: 0; flex: 1; }
-  .brand-text strong { font-size: 15px; }
-  .brand-text .muted { font-size: 11.5px; max-width: 175px; }
+  .brand-text strong { font-size: 15.5px; }
+  .brand-text .muted { font-size: 11.5px; max-width: 180px; }
   .topbar-actions { gap: 6px; }
   #check-btn span, #settings-btn span, #clean-btn span { display: none; }
-  #check-btn, #settings-btn, #clean-btn { padding: 8px 10px; border-radius: 9px; }
+  #check-btn, #settings-btn, #clean-btn {
+    width: 36px; height: 36px; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 10px; flex: none;
+  }
 
   /* 提示条与卡片边距严格对齐（13px） */
-  .notice { margin: 12px 13px 0; padding: 10px 13px; font-size: 13px; border-radius: 12px; }
+  .notice { margin: 10px 13px 0; padding: 10px 13px; font-size: 13px; border-radius: 12px; }
 
-  /* 本应用自身区块：边距对齐，手机端规整两行 */
+  /* 本应用自身区块（模块2）：移动端精简去重，消除与顶栏完全重复的标题/版本号/刷新按钮 */
   .selfbar {
-    margin: 12px 13px 0; padding: 12px 13px; border-radius: 14px;
-    gap: 8px 10px;
+    margin: 9px 13px 0; padding: 8px 12px; border-radius: 12px;
+    gap: 6px 10px; align-items: center; min-height: 40px;
   }
-  .sb-name { font-size: 14.5px; }
-  .sb-state { font-size: 12.5px; }
-  .sb-right { gap: 6px; }
-  .sb-right .btn.sm { padding: 5px 11px; font-size: 13px; }
+  .selfbar.has-update {
+    padding: 10px 12px;
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+    background: color-mix(in srgb, var(--accent) 7%, var(--bg-soft));
+  }
+  /* 隐藏在手机端与顶栏 100% 重复的信息，只保留核心状态与动作 */
+  .selfbar .sb-name,
+  .selfbar .sb-ver,
+  .selfbar #sb-check {
+    display: none;
+  }
+  .selfbar .sb-tag {
+    font-size: 11px; padding: 2px 7px; flex: none;
+  }
+  .selfbar .sb-state {
+    font-size: 12.5px; flex: 1; min-width: 0; line-height: 1.4;
+  }
+  .selfbar .sb-right {
+    margin-left: auto; flex: none; display: inline-flex; align-items: center;
+  }
+  .selfbar .sb-right .btn {
+    padding: 5px 13px; font-size: 12.5px; border-radius: 8px;
+  }
 
   /* 顶部汇总条：边距与卡片对齐 */
   .summary {
