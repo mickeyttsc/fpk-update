@@ -81,6 +81,8 @@ def main():
         (js, "parts_count", "界面呈现下载残留"),
         (js, "a.downloaded && a.downloaded.version", "确认框里 downloaded 有兜底"),
         (js, "localUnknownRow", "界面如实说明同名外来文件"),
+        (srv, '"app_version"', "后端把本应用版本回给界面"),
+        (js, "app-ver", "界面上显示本应用版本（页脚 / 运行信息）"),
     ]
     print("▸ 修复点必须还在（%d 项）" % len(REQUIRED))
     for text, needle, label in REQUIRED:

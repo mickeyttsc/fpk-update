@@ -287,12 +287,19 @@ console.log('▸ 安装包清理（设置页）');
 try {
   sandbox.__setState({
     apps: [], tasks: [], last_check: null, has_token: true,
+    app_version: '9.8.7',
     settings: { download_dir: '/vol2/x', concurrency: 4, mirror: '', auto_download: false,
       auto_clean: true, theme: 'auto' },
     packages: { count: 3, size: 62914560 },
     whitelist: [], mirror_presets: [], default_download_dir: '/vol2/x',
   });
   sandbox.__render();
+  // 版本号必须在页脚与设置里都渲染出来（之前界面上一个版本号都没有）
+  const foot = sandbox.__els('app-ver').textContent;
+  const kv = sandbox.__els('app-ver-kv').textContent;
+  const okVer = foot.includes('9.8.7') && kv === '9.8.7';
+  console.log(`  ${okVer ? '✔' : '✘'} 界面上显示本应用版本  -> 页脚 "${foot}" / 运行信息 "${kv}"`);
+  if (!okVer) bad++;
   const onTxt = sandbox.__els('pkg-state').textContent;
   const onChk = sandbox.__els('auto-clean-input').checked;
   const okOn = onChk === true && onTxt.includes('3') && onTxt.includes('60');

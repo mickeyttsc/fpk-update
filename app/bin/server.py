@@ -2515,6 +2515,9 @@ class Handler(BaseHTTPRequestHandler):
                 "mirror_presets": MIRROR_PRESETS,
                 "whitelist": load_whitelist(),
                 "device_arch": device_arch(),
+                # 本应用自己的版本（读 /var/apps/fpk-update/manifest，即当前真正在跑的这份）。
+                # 之前界面上一个版本号都没有 —— 用户想确认「我装的是哪一版」无处可看。
+                "app_version": installed_version(APP_NAME) or "",
                 "packages": package_summary(),
             })
 

@@ -471,3 +471,9 @@ code {
   .selwrap { flex-wrap: wrap; }
   .selwrap > span { min-width: 100%; }
 }
+
+/* 页脚：左边升级说明、右边本应用版本号（手机上自动换行，不会挤在一起） */
+.foot { display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; flex-wrap: wrap; }
+.foot #app-ver { flex: none; font-variant-numeric: tabular-nums; }
+@media (max-width: 700px) { .foot #app-ver { flex-basis: 100%; } }
