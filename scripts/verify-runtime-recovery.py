@@ -521,6 +521,26 @@ def main():
     import shutil as _sh4mod
     _sh4mod.rmtree(dl3, ignore_errors=True)
 
+    # ── 6h. 自更新友好：重启后目标版本已装上 → 记成功 ──
+    print("▸ 升级自己时进程会被重启，那条任务不能记成「中断失败」")
+    s.installed_version = lambda n: "9.9"          # 假装现在装的就是 9.9
+    s._save_tasks({"seq": 4, "tasks": [
+        {"id": "tUpd", "appname": "installed-one", "display": "X", "action": "update",
+         "status": "running", "message": "正在升级…", "version": "9.9"},
+        {"id": "tBad", "appname": "installed-one", "display": "X", "action": "update",
+         "status": "running", "message": "正在升级…", "version": "8.8"},
+        {"id": "tDl", "appname": "installed-one", "display": "X", "action": "download",
+         "status": "running", "message": "下载中…", "version": "9.9"},
+    ]})
+    s._recover_stale_tasks()
+    tk = {t["id"]: t for t in s.list_tasks()}
+    chk(tk["tUpd"]["status"] == "ok" and "装好" in tk["tUpd"]["message"],
+        "目标版本已装上 → 记为「更新完成」而不是失败",
+        (tk["tUpd"]["status"], tk["tUpd"]["message"]))
+    chk(tk["tBad"]["status"] == "failed", "版本没对上 → 仍是中断失败", tk["tBad"]["status"])
+    chk(tk["tDl"]["status"] == "failed", "下载任务不套用这条判定（它不改已装版本）",
+        tk["tDl"]["status"])
+
     # ── 7. 自愈必须真的接在启动流程里（只定义不调用等于没修）──
     print("▸ 启动流程接线")
     import ast

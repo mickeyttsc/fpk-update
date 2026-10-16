@@ -67,6 +67,7 @@ BREAKS = [
      "    if False:"),
     ("OPTIONS 预检不实现（退回 501）",
      "    def do_OPTIONS(self):", "    def do_OPTIONS_disabled(self):"),
+    ("自更新后不认「已装好」（记成中断失败）", "                if _done:", "                if False:"),
     ("清理不再保留当前版本的包",
      "        if it.get(\"current\") and not include_current:", "        if False:"),
     ("「已是最新就不下载」判定失效",

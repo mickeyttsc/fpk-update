@@ -1967,6 +1967,8 @@ def do_install(tid, appname):
                         message="已是该版本（%s），无需安装%s" % (cur, note), version=target_ver,
                         path=("" if note else fpk_path), finished_at=now_iso())
             return
+        update_task(tid, version=target_ver, stage="installing",
+                    message="正在安装（%s → %s）…" % (cur, target_ver))
         upgrade_via_daemon(fpk_path, appname, target_ver, progress=_task_progress(tid))
         note = clean_after_install(appname, fpk_path, target_ver)
         update_task(tid, status="ok", stage="done", percent=100,
@@ -2001,6 +2003,10 @@ def do_update(tid, appname):
                         finished_at=now_iso())
             return
         fpk_path, _total, _got, mf = _download_package(app, rel, tid)
+        # 先把目标版本写进任务里：**自更新**（升级 fpk-update 自己）会在升级过程中被应用中心
+        # 重启，进程没了、后面的代码不会执行 —— 重启后靠这个字段判断「到底装上了没」。
+        update_task(tid, version=mf["version"], stage="installing",
+                    message="正在升级（%s → %s）…" % (cur, mf["version"]))
         upgrade_via_daemon(fpk_path, appname, mf["version"], progress=_task_progress(tid))
         note = clean_after_install(appname, fpk_path, mf["version"])
         if note:
@@ -3248,9 +3254,26 @@ def _recover_stale_tasks():
         n = 0
         for t in d["tasks"]:
             if t.get("status") == "running":
-                t["status"] = "failed"
-                t["stage"] = "error"
-                t["message"] = "上一次任务在服务重启时中断了，请重试"
+                # 先分辨一种特别常见的情况：**升级自己**（或正在被升级的那个应用）时，
+                # 应用中心会在升级中途把进程重启 —— 那条任务并不是失败。
+                # 判据：任务记了目标版本，而该应用现在装的正好就是这个版本 → 其实成功了。
+                # （只有 install/update 会改「已装版本」，download 不套用这条。）
+                _app = str(t.get("appname") or "")
+                _tgt = str(t.get("version") or "")
+                _act = str(t.get("action") or "")
+                _done = (_act in ("install", "update") and bool(_app and _tgt)
+                         and norm_version(installed_version(_app) or "") == norm_version(_tgt))
+                if _done:
+                    _label = {"install": "安装", "update": "更新"}.get(_act, "任务")
+                    t["status"] = "ok"
+                    t["stage"] = "done"
+                    t["percent"] = 100
+                    t["message"] = "%s完成：%s（升级过程中服务重启过，已确认装好）" % (_label, _tgt)
+                    log("启动自愈：%s 的 %s 任务在重启前已完成（已装 %s）" % (_app, _act, _tgt))
+                else:
+                    t["status"] = "failed"
+                    t["stage"] = "error"
+                    t["message"] = "上一次任务在服务重启时中断了，请重试"
                 t["finished_at"] = now_iso()
                 t["updated_at"] = now_iso()
                 n += 1

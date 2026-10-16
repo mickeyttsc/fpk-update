@@ -86,6 +86,7 @@ def main():
         (js, "needDownload", "已是最新时界面也禁用「下载」"),
         (srv, "clean_keep_current", "清理默认保留当前版本的包（回滚/修复用）"),
         (srv, "def do_OPTIONS", "显式应答 OPTIONS 预检（不再回 501 HTML）"),
+        (srv, "升级过程中服务重启过", "自更新/升级中途重启的任务记为完成（不是失败）"),
         (srv, "def _method_not_allowed", "其它方法回 405 JSON（不再回 501）"),
         (js, "function notifyFinishedTasks", "任务完成单独弹通知"),
         (js, "· ' + path + ')", "错误提示带上出错的接口路径（便于定位）"),
