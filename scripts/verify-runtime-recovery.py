@@ -425,6 +425,51 @@ def main():
     chk(s.check_state()["running"] is False, "结束后 running 复位")
     s.check_one = real_check_one
 
+    # ── 6e. 本地包按内容认领（谁下载的不重要，字节对不对才重要）──
+    print("▸ 本地包按内容认领（归档目录里的包常常是别的脚本下的）")
+    import hashlib as _hl
+    # 自带临时目录：上面的用例跑完后 tmp 已经被清掉了（rmtree），这里不能复用它
+    dl2 = tempfile.mkdtemp(prefix="fpku-claim-")
+    s.save_settings({"download_dir": dl2})
+    real = b"A" * 1234
+    good = os.path.join(dl2, "app-a.fpk")
+    with open(good, "wb") as f:
+        f.write(real)
+    rel = {"appname": "installed-one", "version": "9.9", "version_source": "manifest",
+           "display_name": "X", "platform": "all", "tag": "v9.9", "asset_name": "app-a.fpk",
+           "asset_url": "http://x/a.fpk", "sha256": _hl.sha256(real).hexdigest(),
+           "size": len(real), "published_at": None, "notes": "", "source_kind": "repo"}
+    s.resolve_source = lambda entry: rel
+    s.installed_version = lambda n: "9.0"
+    s.installed_display = lambda n: "Installed One"
+    s.device_arch = lambda: "x86"
+    entry = {"repo": "o/n", "url": None, "tag": None, "appname": "installed-one",
+             "display": "X", "note": None}
+    item = s.check_one(entry)
+    chk(bool(item.get("downloaded")) and not item.get("local_unknown"),
+        "内容与 Release 一致 → 认领（即使不是本应用下载的）",
+        (item.get("downloaded"), item.get("local_unknown")))
+    chk((item.get("downloaded") or {}).get("verified_by") == "sha256",
+        "标明是按内容核对过的（verified_by=sha256）",
+        (item.get("downloaded") or {}).get("verified_by"))
+
+    with open(good, "wb") as f:          # 内容不一致（大小也不同，避免缓存误命中）
+        f.write(b"B" * 4321)
+    item2 = s.check_one(entry)
+    lu = item2.get("local_unknown") or {}
+    chk(bool(lu) and "不一致" in (lu.get("reason") or ""),
+        "内容不一致 → 才提示，且说清是内容对不上", lu)
+    chk(not item2.get("downloaded"), "内容不一致时不会认领它（安装按钮不会误导）")
+
+    # 内容一致但要确认缓存不会把「改过的文件」也算成旧的
+    with open(good, "wb") as f:
+        f.write(real)
+    item3 = s.check_one(entry)
+    chk(bool(item3.get("downloaded")), "改回一致的内容后又认领（缓存会随大小/mtime 失效）",
+        item3.get("local_unknown"))
+    import shutil as _sh2
+    _sh2.rmtree(dl2, ignore_errors=True)
+
     # ── 7. 自愈必须真的接在启动流程里（只定义不调用等于没修）──
     print("▸ 启动流程接线")
     import ast

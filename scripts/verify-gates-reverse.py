@@ -64,6 +64,8 @@ BREAKS = [
      "            results[i] = None"),
     ("Release 列表不缓存", "    if hit and now - hit[0] < GH_CACHE_TTL:",
      "    if False:"),
+    ("本地包改回只看台账（不比对内容）",
+     "            if not by_ledger and want_sha:", "            if False:"),
     ("空列表错误提示去掉重试指引", '''        raise RuntimeError(
             "仓库 %s 这次读不到任何 Release —— 多半是 GitHub 侧瞬时抖动。"
             "点一次「检查更新」重试即可。" % repo)''',
@@ -87,9 +89,6 @@ FILE_BREAKS = [
     ("添加应用不校验 appname", "bin/server.py",
      '            if not APPNAME_RE.match(appname or ""):\n                return self._err(400, "安装包内的应用名不合法（%r），拒绝添加" % appname)\n',
      ""),
-    ("同名外来文件被当成当前版本（去掉 local_unknown）", "bin/server.py",
-     "                item[\"local_unknown\"] = {\"name\": rel[\"asset_name\"], \"size\": size}",
-     "                item[\"downloaded\"] = {\"version\": rel[\"version\"], \"path\": local,\n                                        \"size\": size, \"complete\": True}"),
     ("续传不校验 Range", "bin/server.py",
      'getattr(r, "status", 200) != 206', "True"),
     ("前端确认框去掉 downloaded 兜底", "www/app.js",

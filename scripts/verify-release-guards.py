@@ -81,6 +81,8 @@ def main():
         (js, "parts_count", "界面呈现下载残留"),
         (js, "a.downloaded && a.downloaded.version", "确认框里 downloaded 有兜底"),
         (js, "localUnknownRow", "界面如实说明同名外来文件"),
+        (srv, "_local_sha256_cached", "本地包按内容（sha256）认领，而不是只看谁下载的"),
+        (js, "lu.reason", "提示只在内容真的对不上时出现，并说清原因"),
         (srv, '"app_version"', "后端把本应用版本回给界面"),
         (js, "app-ver-chip", "顶栏常驻显示本应用版本"),
         (js, "app-ver-kv", "设置「运行信息」里也显示版本"),

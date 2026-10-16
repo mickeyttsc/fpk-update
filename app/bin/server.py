@@ -1230,18 +1230,32 @@ def check_one(app):
         d = download_dir()
         local = os.path.join(d, rel["asset_name"])
         if os.path.isfile(local):
-            led = _load_registry().get(os.path.realpath(local)) or {}
-            want_sha = (rel.get("sha256") or "")[:16]
-            known = (norm_version(led.get("version") or "") == norm_version(rel["version"])
-                     and bool(want_sha) and led.get("sha256") == want_sha)
             size = os.path.getsize(local)
-            if known:
+            want_sha = (rel.get("sha256") or "").lower()
+            # 快路：台账里有这一版、且 sha 前 16 位对得上 → 不必再算哈希
+            led = _load_registry().get(os.path.realpath(local)) or {}
+            by_ledger = (bool(want_sha)
+                         and norm_version(led.get("version") or "") == norm_version(rel["version"])
+                         and led.get("sha256") == want_sha[:16])
+            # 慢路（但正确）：直接比对**内容**。谁下载的不重要，字节对不对才重要 ——
+            # 归档目录里的包常常是别的脚本下的，只看「谁下的」会把它们全误判成外来，
+            # 连带把「安装」也禁掉（实测用户就是这么被误伤的）。
+            by_hash = False
+            if not by_ledger and want_sha:
+                by_hash = (_local_sha256_cached(local) == want_sha)
+            if by_ledger or by_hash:
                 item["downloaded"] = {
                     "version": rel["version"], "path": local, "size": size,
-                    "complete": (rel.get("size") is None or size == rel["size"]),
+                    # 内容已核对一致 → 就是这一版（尺寸自然也吻合）
+                    "complete": True,
+                    "verified_by": "ledger" if by_ledger else "sha256",
                 }
             else:
-                item["local_unknown"] = {"name": rel["asset_name"], "size": size}
+                item["local_unknown"] = {
+                    "name": rel["asset_name"], "size": size,
+                    "reason": ("内容与 Release 不一致（可能是旧版本或没下完）" if want_sha
+                               else "这个来源没有 sha256 摘要，无法核对内容"),
+                }
     except OSError:
         pass
     return item
@@ -1977,6 +1991,42 @@ def _fail_task(tid, appname, exc, keep_path=None):
         keep = "（已下载的安装包保留在 %s，可用于回滚）" % keep_path
     update_task(tid, status="failed", stage="error",
                 message="%s %s" % (detail, keep), finished_at=now_iso())
+
+
+_LOCAL_HASH_CACHE = {}          # realpath -> (size, mtime, sha256)
+
+
+def _local_sha256_cached(path):
+    """算本地文件的 sha256，按 (大小, mtime) 缓存。
+
+    为什么要**按内容**认包、而不是看「谁下载的」：下载目录往往同时是用户的归档目录，
+    里面的包很可能是别的脚本（定时检测之类）下进去的。只说「不是本应用下载的」对用户
+    毫无用处 —— 有用的是「这份文件的字节是不是就是那个 Release 的字节」。
+    实测就是这么误伤过：归档目录里 6 个包全被标成「外来」，连「安装」都被禁用。
+
+    缓存键带 mtime：文件一被覆盖就重算。350MB 的包算一次约 1 秒，而检测是并行的、
+    且只在 (大小, mtime) 变化后才会重算，代价可接受。
+    """
+    rp = os.path.realpath(path)
+    try:
+        st = os.stat(rp)
+    except OSError:
+        return ""
+    key = (st.st_size, st.st_mtime_ns)
+    with _lock:
+        hit = _LOCAL_HASH_CACHE.get(rp)
+        if hit and hit[0] == key[0] and hit[1] == key[1]:
+            return hit[2]
+    try:
+        h = _sha256_file(rp)
+    except OSError:
+        return ""
+    with _lock:
+        _LOCAL_HASH_CACHE[rp] = (key[0], key[1], h)
+        if len(_LOCAL_HASH_CACHE) > 100:
+            for k in list(_LOCAL_HASH_CACHE)[:-100]:
+                _LOCAL_HASH_CACHE.pop(k, None)
+    return h
 
 
 def _sha256_file(path):

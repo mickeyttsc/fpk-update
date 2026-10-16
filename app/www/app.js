@@ -284,8 +284,10 @@ function localUnknownRow(app) {
   // 已经有「本地安装包…」那条状态行时不再重复说（同一件事只说一次）
   const row = el('div', 'c-state warn');
   row.appendChild(el('span', 'c-state-ico', '!'));
-  row.appendChild(el('span', '', '本地有同名文件 ' + lu.name + '（' + fmtSize(lu.size)
-    + '），但不是本应用为这一版下载的（可能是你归档的旧版本）—— 点「下载」会重新取一份并覆盖它'));
+  // 只在**内容真的对不上**时才提示（认包看的是字节，不是「谁下载的」——
+  // 归档目录里的包常常是别的脚本下的，用「谁下的」当判据会把它们全误判成外来、还把「安装」禁掉）
+  row.appendChild(el('span', '', '本地同名文件' + (lu.reason ? '：' + lu.reason : '与这一版不一致')
+    + '（' + fmtSize(lu.size) + '）—— 点「下载」重新取一份会覆盖它'));
   return row;
 }
 
