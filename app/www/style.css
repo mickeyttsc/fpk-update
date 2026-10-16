@@ -457,8 +457,8 @@ code {
 
 /* ── Toast ── */
 .toast-wrap {
-  position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
-  z-index: 50; display: flex; flex-direction: column; gap: 8px; align-items: center;
+  position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+  z-index: 70; display: flex; flex-direction: column; gap: 8px; align-items: center;
   pointer-events: none; width: min(92vw, 460px);
 }
 .toast {
@@ -470,37 +470,85 @@ code {
 .toast.err { border-color: color-mix(in srgb, var(--err) 45%, var(--line)); color: var(--err); }
 @keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
-/* ── 手机端 ── */
+/* ── 手机端适配 ── */
 @media (max-width: 700px) {
-  .topbar { padding: 11px 13px; }
+  .topbar { padding: 10px max(13px, env(safe-area-inset-left)) 10px max(13px, env(safe-area-inset-right)); }
+  .brand { min-width: 0; flex: 1; }
   .brand-text strong { font-size: 15px; }
+  .brand-text .muted { font-size: 11.5px; max-width: 175px; }
+  .topbar-actions { gap: 6px; }
   #check-btn span, #settings-btn span, #clean-btn span { display: none; }
-  #check-btn, #settings-btn, #clean-btn { padding: 9px 11px; }
-  .cards { padding: 0 13px; gap: 10px; margin-top: 14px; }
-  .notice { margin-left: 13px; margin-right: 13px; font-size: 13px; }
-  .card { padding: 13px 13px 11px; gap: 10px; }
-  .c-icon { width: 42px; height: 42px; border-radius: 11px; }
+  #check-btn, #settings-btn, #clean-btn { padding: 8px 10px; border-radius: 9px; }
+
+  /* 提示条与卡片边距严格对齐（13px） */
+  .notice { margin: 12px 13px 0; padding: 10px 13px; font-size: 13px; border-radius: 12px; }
+
+  /* 本应用自身区块：边距对齐，手机端规整两行 */
+  .selfbar {
+    margin: 12px 13px 0; padding: 12px 13px; border-radius: 14px;
+    gap: 8px 10px;
+  }
+  .sb-name { font-size: 14.5px; }
+  .sb-state { font-size: 12.5px; }
+  .sb-right { gap: 6px; }
+  .sb-right .btn.sm { padding: 5px 11px; font-size: 13px; }
+
+  /* 顶部汇总条：边距与卡片对齐 */
+  .summary {
+    margin: 12px 13px 0; padding: 10px 13px; border-radius: 13px;
+    gap: 8px 12px;
+  }
+  .summary .s-txt { font-size: 13px; }
+  .summary .s-actions { gap: 6px; }
+  .summary .s-actions .btn { padding: 5px 10px; font-size: 12.5px; }
+
+  /* 卡片列表与卡片 */
+  .cards { padding: 0 13px; gap: 10px; margin-top: 12px; }
+  .card { padding: 13px 13px 11px; gap: 10px; border-radius: 14px; }
+  .c-head { gap: 10px; }
+  .c-icon { width: 42px; height: 42px; border-radius: 10px; }
   .c-name strong { font-size: 15px; }
   .c-src { font-size: 11px; }
-  .c-actions .btn { padding: 9px 4px; font-size: 12.5px; }
-  .foot { margin-bottom: 26px; }
+  .c-vers { gap: 6px 12px; }
+  .c-actions .btn { padding: 9px 4px; font-size: 13px; border-radius: 9px; }
+  .foot { margin: 18px auto 28px; padding: 0 13px; margin-bottom: 26px; }
 
-  /* 设置弹窗：手机上进全屏，别挤在一个小卡片里 */
-  .modal { padding: 0; align-items: stretch; }
+  /* 弹窗层级分工：
+     普通设置弹窗进全屏；确认弹窗是独立高层级（z-index: 60）居中浮层，
+     即便在全屏设置弹窗内触发也能稳稳浮在最顶层，不会被全屏设置遮挡 */
+  .modal:not(#confirm-modal) { padding: 0; align-items: stretch; }
+  #confirm-modal {
+    padding: 14px;
+    align-items: center;
+    justify-items: center;
+    z-index: 60;
+  }
+  .modal-card.cf {
+    width: 100%; max-width: 380px; border-radius: 16px;
+    padding: 18px 16px 14px; margin: auto;
+  }
+
   /* 只有设置那种大面板才全屏；确认弹窗在手机上仍是居中对话框 */
   .modal-card:not(.cf), .modal-card.wide:not(.cf) {
     max-width: none; width: 100%; border-radius: 0; border: none;
     min-height: 100vh; max-height: 100vh; overflow-y: auto;
-    padding: 16px 14px calc(24px + env(safe-area-inset-bottom));
+    padding: 16px 14px calc(32px + env(safe-area-inset-bottom));
   }
   .modal-head { position: sticky; top: -16px; background: var(--bg-soft);
-    padding: 8px 0; z-index: 2; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
-  .tabs { position: sticky; top: 44px; z-index: 2;
-    background: var(--bg-soft); padding: 3px 0 8px; margin-bottom: 10px;
+    padding: 10px 0; z-index: 5; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
+  .tabs { position: sticky; top: 44px; z-index: 5;
+    background: var(--bg-soft); padding: 4px 0 8px; margin-bottom: 12px;
     border-bottom: 1px solid var(--line); }
-  .tabs .tab { font-size: 13px; padding: 8px 6px; }
-  .approw { flex-wrap: wrap; }
+  .tabs .tab { font-size: 13px; padding: 7px 4px; }
+
+  .pane h4 { margin: 16px 0 6px; font-size: 13px; padding-top: 12px; }
+  .row { gap: 6px; }
+  .row > input { padding: 8px 10px; font-size: 13px; }
+  .set-hint { font-size: 11.5px; }
+  .approw { flex-wrap: wrap; padding: 8px 10px; gap: 6px 8px; }
   .approw .src { flex-basis: 100%; }
+  .approw .rm { padding: 4px 10px; font-size: 12px; }
+  .taskrow { padding: 8px 10px; }
   .selwrap { flex-wrap: wrap; }
   .selwrap > span { min-width: 100%; }
 }
@@ -521,6 +569,12 @@ code {
 }
 
 /* ── 应用内确认弹窗 ── */
+#confirm-modal {
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+}
 .modal-card.cf {
   max-width: 420px; padding: 18px 18px 14px;
   width: calc(100% - 36px); min-height: 0; max-height: 82vh; overflow-y: auto;
