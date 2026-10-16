@@ -25,7 +25,12 @@ function makeEl(tag) {
     },
     _fire(type, ev) { (this._ev[type] || []).slice().forEach((fn) => fn(ev || {})); },
     focus() { document.activeElement = this; },
-    appendChild(c) { this.children.push(c); if (c) c.parentNode = this; return c; },
+    appendChild(c) {
+      // 真实 DOM：appendChild(null) 会抛 TypeError。桩必须一样，否则这类 bug 测不出来
+      // （实测就漏过一次：resultStrip 返回 null 被直接挂上去）
+      if (c === null || c === undefined) throw new TypeError('appendChild 收到 null/undefined');
+      this.children.push(c); c.parentNode = this; return c;
+    },
     insertBefore(c, ref) {
       const i = ref ? this.children.indexOf(ref) : -1;
       if (i === -1) this.children.push(c); else this.children.splice(i, 0, c);
@@ -65,7 +70,9 @@ try {
   console.log('  （读不到 index.html，跳过 id 校验：' + htmlPath + '）');
 }
 const idSet = new Set(htmlIds);
+if (!idSet.has('toasts')) idSet.add('toasts');      // 兜底：#toasts 在 index.html 里确实存在
 const document = {
+  body: null,
   createElement: makeEl,
   getElementById: (id) => {
     if (htmlIds.length && !idSet.has(id)) return null;
@@ -78,10 +85,13 @@ const document = {
   },
   _fire(type, ev) { (this._ev[type] || []).slice().forEach((fn) => fn(ev || {})); },
   activeElement: null,
+  body: null,
   querySelector: () => makeEl('div'),
   querySelectorAll: () => [],
   documentElement: makeEl('html'),
 };
+
+document.body = makeEl('body');
 
 const sandbox = {
   document,
@@ -463,7 +473,8 @@ try {
   console.log('▸ 任务结束（下载成功）');
   sandbox.__setState({
     apps: [app], last_check: null, has_token: true,
-    tasks: [{ id: 't3', appname: 'wildwork', action: 'download', status: 'ok',
+    tasks: [{ id: 't-ok-notify', appname: 'wildwork', display: 'Wild Work',
+      action: 'download', status: 'ok',
       percent: 100, message: '已下载 wildwork-2.8.1-1.fpk（8.0 MB，sha256 abcd…）',
       finished_at: new Date().toISOString() }],
     settings: { download_dir: '/vol2/x', concurrency: 4, mirror: '', auto_download: false,
@@ -471,6 +482,7 @@ try {
     packages: { count: 0, size: 0, foreign_count: 0, foreign_size: 0 },
     whitelist: [], mirror_presets: [], default_download_dir: '/vol2/x',
   });
+  sandbox.__render();               // 完成通知是在 render() 里发的（renderCard 不发）
   const card3 = sandbox.__renderCard(app);
   let btns3 = [], t3 = [];
   const walk3 = (e) => {
@@ -482,10 +494,19 @@ try {
   const dlBtn = btns3.find((b) => b.textContent === '下载');
   const upBtn = btns3.find((b) => b.textContent === '下载并更新');
   const reEnabled = dlBtn && dlBtn.disabled === false && upBtn && upBtn.disabled === false;
-  const showsResult = t3.join(' | ').includes('已下载');
   console.log(`  ${reEnabled ? '✔' : '✘'} 任务结束后按钮恢复可点（不再被判为进行中）`);
-  console.log(`  ${showsResult ? '✔' : '✘'} 结果条显示后端给的结果文案`);
-  if (!(reEnabled && showsResult)) bad++;
+  if (!reEnabled) bad++;
+
+  // 成功不再在卡片上留结果条（用户要求：卡片恢复成和其他「已是最新」一样的普通形态）
+  const noStrip = !t3.join(' | ').includes('已下载');
+  console.log(`  ${noStrip ? '✔' : '✘'} 成功时卡片上不留结果条（回到普通形态）`);
+  if (!noStrip) bad++;
+
+  // 但必须单独弹一条「完成」通知 —— 否则用户不知道刚才发生了什么
+  const toasts = sandbox.__els('toasts').children.map((c) => c.textContent).join(' | ');
+  const gotToast = toasts.includes('Wild Work') && toasts.includes('已下载');
+  console.log(`  ${gotToast ? '✔' : '✘'} 完成时单独弹一条通知  -> "${toasts.slice(0, 60)}"`);
+  if (!gotToast) bad++;
 } catch (e) {
   console.log('  ✘ 抛异常 -> ' + e.message);
   bad++;

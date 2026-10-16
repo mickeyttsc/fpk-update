@@ -2622,6 +2622,38 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    def do_OPTIONS(self):
+        """预检请求。
+
+        为什么必须有：BaseHTTPRequestHandler 对**未实现的方法**一律回
+        `501 Unsupported method` + 一张 HTML 错误页。而前端拿到非 JSON 响应时只能报
+        「请求失败（HTTP 501）」—— 用户看到的就是这条没头没尾的红字（实测反馈）。
+        跨源/反向代理场景下浏览器会先发 OPTIONS 预检，本应用又是自定义头 + JSON 的 POST，
+        所以这里必须显式应答，而不是让它掉进 501。
+        """
+        self.close_connection = True
+        self._send(204, b"", ctype="text/plain; charset=utf-8", extra={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, X-Requested-With",
+            "Access-Control-Max-Age": "600",
+        })
+
+    def _method_not_allowed(self):
+        """其它方法（PUT/DELETE/PATCH…）：明确回 405 JSON，不要回 501 HTML。"""
+        self._json({"ok": False, "error": "不支持 %s 方法（本应用只有 GET / POST / OPTIONS）"
+                                       % self.command}, code=405,
+                   extra={"Allow": "GET, POST, HEAD, OPTIONS"})
+
+    def do_PUT(self):
+        self._method_not_allowed()
+
+    def do_DELETE(self):
+        self._method_not_allowed()
+
+    def do_PATCH(self):
+        self._method_not_allowed()
+
     def do_GET(self):
         try:
             self._route_get()

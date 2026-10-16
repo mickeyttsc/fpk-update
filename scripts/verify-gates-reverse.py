@@ -65,6 +65,8 @@ BREAKS = [
      "            results[i] = None"),
     ("Release 列表不缓存", "    if hit and now - hit[0] < GH_CACHE_TTL:",
      "    if False:"),
+    ("OPTIONS 预检不实现（退回 501）",
+     "    def do_OPTIONS(self):", "    def do_OPTIONS_disabled(self):"),
     ("清理不再保留当前版本的包",
      "        if it.get(\"current\") and not include_current:", "        if False:"),
     ("「已是最新就不下载」判定失效",
@@ -110,6 +112,8 @@ FILE_BREAKS = [
 
 # 前端破坏用例：(标签, 原文, 改成) —— 跑 render-selftest.js 应当报红
 FE_BREAKS = [
+    ("成功时又留结果条（卡片不回到普通形态）",
+     "  if (ok) return null;", "  if (false) return null;"),
     ("卡片改回全量重建（不再复用节点）",
      "      if (n.__sig) (pool[n.__sig] = pool[n.__sig] || []).push(n);",
      "      if (false) (pool[n.__sig] = pool[n.__sig] || []).push(n);"),

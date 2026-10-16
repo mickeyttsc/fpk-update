@@ -59,7 +59,10 @@ async function api(path, opts = {}) {
   let data = null;
   try { data = await res.json(); } catch (e) { data = null; }
   if (!res.ok) {
-    const msg = (data && data.error) || ('请求失败（HTTP ' + res.status + '）');
+    // 带上出错的接口路径：响应不是 JSON 时（反向代理/服务器直接回错误页）
+    // 光有状态码根本不知道是哪一条请求挂的（实测 501 就是这么摸不清头脑）
+    const msg = (data && data.error)
+      || ('请求失败（HTTP ' + res.status + ' · ' + path + '）');
     const err = new Error(msg);
     err.status = res.status;
     throw err;
@@ -68,13 +71,14 @@ async function api(path, opts = {}) {
 }
 
 /* ── Toast ── */
-function toast(msg, kind = '') {
+function toast(msg, kind = '', ms = 4200) {
   const el = document.createElement('div');
   el.className = 'toast ' + kind;
   el.textContent = msg;
   $('toasts').appendChild(el);
-  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; }, 3800);
-  setTimeout(() => el.remove(), 4200);
+  const fade = Math.max(600, ms - 400);      // 完成通知要留够阅读时间（默认 4.2s / 通知 9s）
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; }, fade);
+  setTimeout(() => el.remove(), ms);
 }
 
 function showNotice(msg, kind = 'info') {
@@ -328,14 +332,18 @@ function renderCard(app) {
     card.appendChild(d);
   }
 
-  /* 状态：进度 / 结果 / 静态，三选一 */
+  /* 状态：进度 / 结果 / 静态，三选一。
+     注意：子节点可能是 null（例如成功时不再留结果条）——真浏览器的 appendChild(null)
+     会直接抛异常、整张卡片画不出来，所以必须先判断再挂。 */
+  const put = (node) => { if (node) card.appendChild(node); };
   if (running) {
-    card.appendChild(progressBlock(task, 'run'));
+    put(progressBlock(task, 'run'));
   } else if (finished) {
-    card.appendChild(resultStrip(task, app));
+    put(resultStrip(task, app));
+    // 成功：结果条为空 → 回到与其他「已是最新」一样的普通静态状态
+    if (task.status === 'ok') put(staticState(app));
   } else {
-    const st = staticState(app);
-    if (st) card.appendChild(st);
+    put(staticState(app));
   }
 
   if (app.error) card.appendChild(el('div', 'c-err', app.error));
@@ -402,6 +410,10 @@ function progressBlock(task, mode) {
 /* 结果条（任务刚结束时显示一条，可关闭/可重试；没有进度条，避免与结果重复表达） */
 function resultStrip(task, app) {
   const ok = task.status === 'ok';
+  // 成功不留在卡片上：任务完成时单独弹一条通知（见 notifyFinishedTasks），
+  // 卡片就回到和其他「已是最新」一模一样的普通形态 —— 这是用户明确要的。
+  // 失败仍然留在卡片上，因为要能就地「重试」。
+  if (ok) return null;
   const row = el('div', 'c-state ' + (ok ? 'ok' : 'bad'));
   row.appendChild(el('span', 'c-state-ico', ok ? '✓' : '✕'));
   row.appendChild(el('span', '', task.message || (ok ? '完成' : '失败')));
@@ -432,6 +444,32 @@ function syncInput(id, val) {
 }
 
 let lastChecking = false;      // 用于识别「检查刚结束」，只在那一刻弹结论
+let notifiedTasks = null;      // 已经通知过的任务 id（避免每轮轮询重复弹）
+
+/* 任务结束时弹一条通知 —— 而不是在卡片上长期留一条结果条。
+   用户要的是：「更新完成」单独弹一下，卡片恢复成和其他「已是最新」一样的普通形态。 */
+function notifyFinishedTasks(tasks) {
+  const now = Date.now();
+  const fresh = (tasks || []).filter((t) => {
+    if (t.status !== 'ok' && t.status !== 'failed') return false;
+    const ts = Date.parse(t.finished_at || '');
+    return !isNaN(ts) && (now - ts) < 5 * 60 * 1000;      // 只看最近 5 分钟
+  });
+  if (notifiedTasks === null) {
+    // 首次渲染：把「一分钟以前就结束的」直接标记为已通知，免得一打开页面弹一堆历史
+    notifiedTasks = new Set(fresh.filter((t) => {
+      const ts = Date.parse(t.finished_at);
+      return (now - ts) > 60000;
+    }).map((t) => t.id));
+  }
+  fresh.forEach((t) => {
+    if (notifiedTasks.has(t.id)) return;
+    notifiedTasks.add(t.id);
+    const nm = t.display || t.appname;
+    const body = t.message || (actionLabel(t.action) + (t.status === 'ok' ? '完成' : '失败'));
+    toast(nm + '：' + body, t.status === 'ok' ? 'ok' : 'err', 9000);
+  });
+}
 
 function render() {
   const s = state;
@@ -459,6 +497,9 @@ function render() {
     else toast('检查完成：全部已是最新', 'ok');
   }
   lastChecking = !!ck.running;
+
+  // 任务结束 → 单独弹一条通知（成功与失败都弹；失败另外还留在卡片上可重试）
+  notifyFinishedTasks(s.tasks);
 
   const cards = $('cards');
   const apps = s.apps || [];

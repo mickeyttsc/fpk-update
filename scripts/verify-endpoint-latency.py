@@ -183,6 +183,19 @@ def main():
     _, code2, _, _ = call("/api/download", {"appname": "old-one"}, reps=1)
     chk(code2 == 200, "有更新 → 接口放行", code2)
 
+    # ★ 未实现的方法不许回 501（Python 默认行为是 501 + HTML 错误页，
+    #   前端只会报「请求失败（HTTP 501）」，实测用户就是这么撞上的）
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    c.request("OPTIONS", "/api/log", headers=HDR)
+    r = c.getresponse(); r.read(); code_opt = r.status; c.close()
+    chk(code_opt in (200, 204), "OPTIONS 预检有应答（不是 501）", code_opt)
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    c.request("PUT", "/api/log", body=b"{}", headers=HDR)
+    r = c.getresponse(); body_put = r.read(); code_put = r.status; c.close()
+    chk(code_put == 405, "其它方法回 405（不是 501 HTML）", code_put)
+    chk(b"ok" in body_put and "不支持".encode() in body_put,
+        "405 也是 JSON 且说明原因", body_put[:60])
+
     # /api/check 必须是「立刻返回、后台跑」，不能等整轮检查
     t0 = time.time()
     call("/api/check", {"force": True}, reps=1)
