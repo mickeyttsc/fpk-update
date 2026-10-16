@@ -83,14 +83,14 @@ def main():
                                      "sha256": "a" * 64, "browser_download_url": "http://x/a.fpk",
                                      "digest": "sha256:" + "a" * 64}]}
     m.gh_get = lambda url, retries=0: [REL]
-    m.gh_releases = lambda repo: [REL]
-    m.resolve_source = lambda entry: {
+    m.gh_releases = lambda repo, force=False: [REL]
+    m.resolve_source = lambda entry, force=False: {
         "appname": "installed-one", "version": "1.2.4", "version_source": "manifest",
         "display_name": "Installed One", "platform": "all", "tag": "v1.2.4",
         "asset_name": "a.fpk", "asset_url": "http://x/a.fpk", "sha256": "a" * 64,
         "size": 1000, "published_at": None, "notes": "", "source_kind": "repo"}
-    m.find_release = lambda repo, allow_pre=False, want_tag="": REL
-    m.check_one = lambda a: {"appname": a.get("appname"), "display": a.get("display"),
+    m.find_release = lambda repo, allow_pre=False, want_tag="", force=False: REL
+    m.check_one = lambda a, force=False: {"appname": a.get("appname"), "display": a.get("display"),
                              "installed": "1.2.3", "latest": "1.2.4",
                              "update_available": True, "error": None, "sha256": "a" * 64,
                              "downloaded": None, "local_unknown": None}
@@ -138,19 +138,38 @@ def main():
         ("POST /api/apps/pin", "/api/apps/pin", {"source": "owner/repo", "tag": "v1.2.4"}),
         ("POST /api/apps/pin(没变)", "/api/apps/pin", {"source": "owner/repo", "tag": "v1.2.4"}),
         ("POST /api/download(入队)", "/api/download", {"appname": "installed-one"}),
-        ("POST /api/check(必须立刻返回)", "/api/check", {"force": True}),
+    
+        # /api/check 放最后、而且**只打一次**（第四个元素 = reps）。
+        # 它会在后台真跑一轮检测、重写 last-check.json；默认的 5 次调用会因为
+        # 「第一轮已经跑完」而连着起第二轮，最后一轮落在后面刚写的种子状态之后，
+        # 把那两条 409 断言变成看运气（实测 14 次里红 2 次、CI 上也红过一次）。
+        ("POST /api/check(必须立刻返回)", "/api/check", {"force": True}, 1),
     ]
 
     print("▸ 每个接口的耗时上限 %.0f ms（网络调用已换瞬时桩）" % BUDGET_MS)
     slow = []
-    for label, path, body in CASES:
-        worst, code, hd, raw = call(path, body)
+    for _c in CASES:
+        label, path, body = _c[0], _c[1], _c[2]
+        worst, code, hd, raw = call(path, body, reps=(_c[3] if len(_c) > 3 else 5))
         ok = worst < BUDGET_MS
         if not ok:
             slow.append((label, worst))
         print("  %s %-30s %7.1f ms  HTTP %s" % ("✔" if ok else "✘", label, worst, code))
     chk(not slow, "所有接口都在 %.0f ms 内" % BUDGET_MS,
         ["%s=%.0fms" % (a, b) for a, b in slow])
+
+    # ★ 等一下：/api/check 是异步的，它会在后台重写 last-check.json。
+    # 判据用「状态文件真的被写过」，不要用 running：只要有一次判早了（检查线程还没
+    # 复位、或复位了但文件还没落地），后面刚写的种子就会被它覆盖，两条 409 断言
+    # 就变成看运气 —— 实测 14 次里红 2 次、CI 上也红过一次。文件是唯一可靠的凭据。
+    _lc = os.path.join(var, "last-check.json")
+    for _ in range(600):
+        if not m.check_state()["running"] and os.path.exists(_lc):
+            break
+        time.sleep(0.05)
+    # 再把「检测」冻住：下面测的是**接口行为**，状态必须是静止的。
+    # 留一个能写 last-check.json 的后台线程，断言就还是看运气。
+    m.run_check = lambda *a, **k: None
 
     # ★ 接口行为：「已是最新就不下载」必须由**接口**保证，不能只靠界面禁用按钮
     #

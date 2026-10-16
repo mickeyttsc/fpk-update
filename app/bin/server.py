@@ -1437,14 +1437,15 @@ def _run_check_locked(trigger, force=False):
         t.start()
     for t in threads:
         t.join()
-    with _lock:
-        _check_state.update({"running": False, "current": "",
-                             "finished_at": datetime.now(CST).isoformat(timespec="seconds")})
     log("检测完成：%d 个应用（含本应用自身），用时 %.1f 秒" % (len(apps), time.time() - t0))
     for r in results:
         log("  %s: 已装=%s 最新=%s 可更新=%s%s"
             % (r["appname"], r["installed"], r["latest"],
                r["update_available"], (" 错误=" + r["error"]) if r["error"] else ""))
+    # 状态先落盘、再把 running 复位 —— 顺序不能反。
+    # 反了会留一个几毫秒的窗口：running 已经是 False（界面停止转圈、开始读新结果），
+    # 而 last-check.json 还是上一轮的内容。实测这个窗口让「门禁自己」都 flaky 了
+    # （14 次里红 2 次），真实场景里对应的是「检查完了但卡片还是旧的」闪一下。
     with _lock:
         save_json(LAST_CHECK_FILE, {
             "at": datetime.now(CST).isoformat(timespec="seconds"),
@@ -1454,6 +1455,9 @@ def _run_check_locked(trigger, force=False):
             "apps": [r for r in results if not r.get("self")],
             "self": next((r for r in results if r.get("self")), None),
         })
+    with _lock:
+        _check_state.update({"running": False, "current": "",
+                             "finished_at": datetime.now(CST).isoformat(timespec="seconds")})
     if load_settings().get("auto_download"):
         _auto_download(results)
     return results
