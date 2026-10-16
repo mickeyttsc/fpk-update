@@ -162,6 +162,11 @@ def main():
             read(os.path.join(app, "..", "config", "apps.json"))
         chk("fpk-update" not in apps_json,
             "内置默认列表里没有本应用自己（自身更新走独立链路）")
+        chk("ekko-studio-fpk" not in apps_json and "cliproxyapi-fpk" not in apps_json and "wild-work-fpk" not in apps_json,
+            "内置默认列表里没有预置作者个人仓库（保持纯净初始状态）")
+        import json as _j
+        _aj = _j.loads(apps_json) if apps_json else {}
+        chk(_aj.get("apps") == [], "内置默认 apps 数组为空列表")
 
     # 密码类残留：wizard/ 与 cmd/ 都不许出现肯定式「密码」表述
     hits = []

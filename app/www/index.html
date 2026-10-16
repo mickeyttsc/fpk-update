@@ -27,6 +27,13 @@
     </div>
   </div>
   <div class="topbar-actions">
+    <button class="btn ghost" id="add-btn" title="添加被管理的 GitHub 应用仓库" aria-label="添加应用">
+      <svg viewBox="0 0 24 24" class="ico" aria-hidden="true" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 5v14M5 12h14"/>
+      </svg>
+      <span>添加</span>
+    </button>
     <button class="btn ghost" id="check-btn" title="立即检查所有应用的最新版本">
       <svg viewBox="0 0 24 24" class="ico" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
       <span>检查更新</span>
@@ -116,6 +123,11 @@
           「全部更新」也不会带上它（更新自己会重启本应用，会把队列里后面的应用一起打断）。
         </p>
         <div class="applist" id="apps-list"></div>
+
+        <h4>添加应用仓库</h4>
+        <p class="set-hint">
+          输入 GitHub 仓库名（如 <code>owner/name</code> 或完整链接），点击获取版本后即可添加进管理列表。
+        </p>
         <div class="row">
           <input type="text" id="app-add-input" placeholder="owner/name 或 https://github.com/owner/name"
                  spellcheck="false" autocomplete="off">
@@ -144,7 +156,7 @@
         </div>
 
         <div class="row">
-          <button class="btn ghost" id="apps-reset">恢复默认列表</button>
+          <button class="btn ghost" id="apps-reset">清空列表</button>
         </div>
 
         <h4>本应用自己</h4>

@@ -82,7 +82,7 @@ def main():
                               "status": "running", "message": "分段下载中…"}]}
     s._save_tasks(d)
     with open(os.path.join(tmp, "apps.json"), "w", encoding="utf-8") as f:
-        json.dump({"apps": [{"repo": "mickeyttsc/wild-work-fpk", "appname": "wildwork",
+        json.dump({"apps": [{"repo": "demo/wild-work-fpk", "appname": "wildwork",
                              "display": "Wild Work"}]}, f)
     s._recover_stale_tasks()
     tid = s.enqueue("wildwork", "download")
@@ -480,7 +480,7 @@ def main():
     s.load_whitelist = REAL_LOAD_WL     # 前面几节把列表换成了桩，这一节要测真的过滤逻辑
     with open(os.environ["FPKU_APPS_USER"], "w", encoding="utf-8") as f:
         json.dump({"apps": [
-            {"appname": "cliproxyapi", "repo": "mickeyttsc/cliproxyapi-fpk"},
+            {"appname": "cliproxyapi", "repo": "demo/cliproxyapi-fpk"},
             {"appname": "fpk-update", "repo": "mickeyttsc/fpk-update"},   # 自己（写了 appname）
             {"appname": "", "repo": "someone/fpk-update"},                # 自己（只按仓库名认）
         ]}, f)

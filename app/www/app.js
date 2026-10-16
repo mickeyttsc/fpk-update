@@ -516,15 +516,20 @@ function render() {
   if (!apps.length) {
     cards.textContent = '';
     const empty = document.createElement('div');
-    empty.className = 'card';
+    empty.className = 'card empty-guide';
     const b = document.createElement('div');
     b.className = 'body';
     const t = document.createElement('strong');
-    t.textContent = '被管理的应用是空的';
+    t.textContent = '还没有添加被管理的应用';
     const p = document.createElement('div');
     p.className = 'note';
-    p.textContent = '请编辑数据目录里的 apps.json，把要管理的应用加进去（文件内有格式说明），刷新本页即可。';
-    b.appendChild(t); b.appendChild(p); empty.appendChild(b);
+    p.textContent = '支持任何在 Releases 中发布 .fpk 的 GitHub 仓库。输入仓库地址即可自动识别版本并检查更新。';
+    const addAction = document.createElement('button');
+    addAction.className = 'btn primary sm';
+    addAction.textContent = '+ 添加第一个应用';
+    addAction.style.marginTop = '12px';
+    addAction.addEventListener('click', openAddApp);
+    b.appendChild(t); b.appendChild(p); b.appendChild(addAction); empty.appendChild(b);
     cards.appendChild(empty);
   } else {
     /* 排序（对标应用商店）：正在动的 → 有新版本的 → 正常的，同级按名字。
@@ -1156,6 +1161,18 @@ function stopPoll() {
 function openSettings() { $('settings-modal').classList.remove('hidden'); }
 function closeSettings() { $('settings-modal').classList.add('hidden'); }
 
+function openAddApp() {
+  openSettings();
+  switchTab('apps');
+  setTimeout(() => {
+    const input = $('app-add-input');
+    if (input) {
+      input.focus();
+      if (input.scrollIntoView) input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, 60);
+}
+
 async function showLog() {
   const box = $('log-box');
   if (!box.classList.contains('hidden')) { box.classList.add('hidden'); return; }
@@ -1168,6 +1185,7 @@ async function showLog() {
 }
 
 /* ── 事件 ── */
+$('add-btn').addEventListener('click', openAddApp);
 $('check-btn').addEventListener('click', (ev) => doCheck(ev.currentTarget));
 $('settings-btn').addEventListener('click', openSettings);
 $('settings-close').addEventListener('click', closeSettings);
@@ -1527,13 +1545,14 @@ $('app-add-input').addEventListener('keydown', (ev) => {
 
 $('apps-reset').addEventListener('click', async () => {
   if (!(await askDialog({
-    title: '把列表恢复成内置默认',
-    notes: ['会替换掉现在这份被管理应用列表（三个自建应用），不会卸载应用、也不会删文件。'],
-    okText: '恢复默认',
+    title: '清空被管理应用列表',
+    notes: ['会清空当前被管理应用列表（恢复为初始空列表），不会卸载已安装应用、也不会删文件。'],
+    okText: '确认清空',
+    danger: true,
   }))) return;
   try {
     await api('/api/apps/reset', { method: 'POST' });
-    toast('已恢复默认列表', 'ok');
+    toast('已清空列表', 'ok');
     await refresh();
     doCheck($('check-btn'));
   } catch (e) { toast(e.message, 'err'); }

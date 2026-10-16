@@ -222,7 +222,7 @@
 ```json
 {
   "apps": [
-    { "repo": "mickeyttsc/cliproxyapi-fpk" },
+    { "repo": "owner/example-fpk" },
     { "repo": "jia070310/lemon-muisc" },
     { "repo": "owner/name", "appname": "xxx", "tag": "v1.2.3",
       "asset": "*x86*.fpk", "allow_prerelease": true,

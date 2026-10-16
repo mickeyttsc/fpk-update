@@ -181,21 +181,21 @@ const cases = [
   }],
   ['有新版本', {
     appname: 'cliproxyapi', display: 'CLIProxyAPI', has_icon: true,
-    repo: 'mickeyttsc/cliproxyapi-fpk', installed: '8.0.31-1', latest: '8.0.32-1',
+    repo: 'demo/cliproxyapi-fpk', installed: '8.0.31-1', latest: '8.0.32-1',
     update_available: true, relation: 'newer', size: 24427225,
     published_at: '2026-10-16T04:05:00Z', error: null,
     downloaded: null,
   }],
   ['有新版本 + 已下好新版', {
     appname: 'cliproxyapi', display: 'CLIProxyAPI', has_icon: true,
-    repo: 'mickeyttsc/cliproxyapi-fpk', installed: '8.0.31-1', latest: '8.0.32-1',
+    repo: 'demo/cliproxyapi-fpk', installed: '8.0.31-1', latest: '8.0.32-1',
     update_available: true, relation: 'newer', size: 24427225,
     published_at: '2026-10-16T04:05:00Z', error: null,
     downloaded: { version: '8.0.32-1', size: 24427225, complete: true },
   }],
   ['本地包不完整', {
     appname: 'hermes-studio', display: 'Ekko Studio', has_icon: false,
-    repo: 'mickeyttsc/ekko-studio-fpk', installed: '0.7.36-1', latest: '0.7.36-1',
+    repo: 'demo/ekko-studio-fpk', installed: '0.7.36-1', latest: '0.7.36-1',
     update_available: false, relation: 'same', size: 357248895,
     published_at: '2026-10-15T14:49:44Z', error: null,
     downloaded: { version: '0.7.36-1', size: 357240506, complete: false },
@@ -288,7 +288,7 @@ try {
   sandbox.__setState({ tasks: [] });
   const card = sandbox.__renderCard({
     appname: 'cliproxyapi', display: 'CLIProxyAPI', has_icon: true,
-    repo: 'mickeyttsc/cliproxyapi-fpk', installed: '8.0.31-1', latest: '8.0.32-1',
+    repo: 'demo/cliproxyapi-fpk', installed: '8.0.31-1', latest: '8.0.32-1',
     update_available: true, relation: 'newer', size: 24427225, published_at: null,
     error: null, downloaded: null, notes: '跟随上游 v8.0.32；修了若干问题。',
   });
@@ -310,7 +310,7 @@ try {
     status: 'failed', message: '下载失败：连接超时', finished_at: new Date().toISOString() }] });
   const card = sandbox.__renderCard({
     appname: 'wildwork', display: 'Wild Work', has_icon: true,
-    repo: 'mickeyttsc/wild-work-fpk', installed: '2.8.0-1', latest: '2.8.1-1',
+    repo: 'demo/wild-work-fpk', installed: '2.8.0-1', latest: '2.8.1-1',
     update_available: true, relation: 'newer', size: 8367502, published_at: null,
     error: null, downloaded: null, notes: '',
   });
@@ -412,7 +412,7 @@ console.log('▸ 任务进行中（下载 42%）');
 try {
   const app = {
     appname: 'wildwork', display: 'Wild Work', has_icon: false,
-    repo: 'mickeyttsc/wild-work-fpk', installed: '2.8.0-1', latest: '2.8.1-1',
+    repo: 'demo/wild-work-fpk', installed: '2.8.0-1', latest: '2.8.1-1',
     update_available: true, relation: 'newer', size: 8367502, published_at: null,
     error: null, downloaded: null, notes: '', asset_name: 'wildwork-2.8.1-1.fpk',
   };

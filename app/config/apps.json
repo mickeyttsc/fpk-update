@@ -10,21 +10,5 @@
     "allow_prerelease": "可选。true 时也接受预发布版 / 滚动 tag（如 latest）",
     "note": "可选。卡片上的一句说明"
   },
-  "apps": [
-    {
-      "appname": "hermes-studio",
-      "display": "Ekko Studio",
-      "repo": "mickeyttsc/ekko-studio-fpk"
-    },
-    {
-      "appname": "cliproxyapi",
-      "display": "CLIProxyAPI",
-      "repo": "mickeyttsc/cliproxyapi-fpk"
-    },
-    {
-      "appname": "wildwork",
-      "display": "Wild Work",
-      "repo": "mickeyttsc/wild-work-fpk"
-    }
-  ]
+  "apps": []
 }

@@ -483,8 +483,8 @@ code {
   .brand-text strong { font-size: 15.5px; }
   .brand-text .muted { font-size: 11.5px; max-width: 180px; }
   .topbar-actions { gap: 6px; }
-  #check-btn span, #settings-btn span, #clean-btn span { display: none; }
-  #check-btn, #settings-btn, #clean-btn {
+  #add-btn span, #check-btn span, #settings-btn span, #clean-btn span { display: none; }
+  #add-btn, #check-btn, #settings-btn, #clean-btn {
     width: 36px; height: 36px; padding: 0;
     display: inline-flex; align-items: center; justify-content: center;
     border-radius: 10px; flex: none;
