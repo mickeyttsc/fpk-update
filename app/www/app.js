@@ -342,13 +342,21 @@ function renderCard(app) {
 
   /* 按钮行 */
   const actions = el('div', 'c-actions');
-  const canDownload = !!app.latest && !busy;
+  // 已是最新就不给「下载 / 下载并更新」入口：包是用来升级的，没有升级可做就不该下（实测白下过 400MB）。
+  // 唯一例外：本地同名包内容核对不过（旧版本/没下完）→ 那是「修包」，得留出口。
+  const upToDate = !!app.installed && !!app.latest
+    && normVer(app.installed) === normVer(app.latest) && !app.update_available;
+  const needDownload = !upToDate || !!app.local_unknown
+    || !!(app.downloaded && app.downloaded.complete === false);
+  const canDownload = !!app.latest && !busy && needDownload;
   const canInstall = !!(app.downloaded && app.downloaded.complete && !busy
     && normVer(app.downloaded.version) !== normVer(app.installed));
   const canUpdate = !!app.update_available && !busy;
 
   const bDl = btn('下载', 'ghost sm', () => doAction(app, 'download', '下载'),
-    app.latest ? ('把 ' + app.latest + ' 的安装包下到本地（不改动应用）') : '暂无可用版本');
+    !app.latest ? '暂无可用版本'
+      : (!needDownload ? '已是最新，无需下载（要留回滚包可在设置里「换版本」选旧版本）'
+                       : ('把 ' + app.latest + ' 的安装包下到本地（不改动应用）')));
   const bIn = btn('安装', 'ghost sm', () => doAction(app, 'install', '安装'),
     canInstall ? ('用已下载的 ' + app.downloaded.version + ' 安装（不重新下载）') : '需要先下载安装包');
   const bUp = btn('下载并更新', 'primary sm', () => doAction(app, 'update', '下载并更新'),

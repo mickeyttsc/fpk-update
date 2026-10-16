@@ -18,6 +18,7 @@ SRC = os.path.join(ROOT, "app", "bin", "server.py")
 GATES = [
     (os.path.join(ROOT, "scripts", "verify-clean-safety.py"), "安装包清理安全"),
     (os.path.join(ROOT, "scripts", "verify-runtime-recovery.py"), "运行时健壮性"),
+    (os.path.join(ROOT, "scripts", "verify-endpoint-latency.py"), "接口延迟/行为"),
 ]
 
 BREAKS = [
@@ -64,6 +65,8 @@ BREAKS = [
      "            results[i] = None"),
     ("Release 列表不缓存", "    if hit and now - hit[0] < GH_CACHE_TTL:",
      "    if False:"),
+    ("「已是最新就不下载」判定失效",
+     "and not download_needed(it):", "and False:"),
     ("本地包改回只看台账（不比对内容）",
      "            if not by_ledger and want_sha:", "            if False:"),
     ("空列表错误提示去掉重试指引", '''        raise RuntimeError(

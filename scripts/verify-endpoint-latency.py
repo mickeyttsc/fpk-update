@@ -152,6 +152,37 @@ def main():
     chk(not slow, "所有接口都在 %.0f ms 内" % BUDGET_MS,
         ["%s=%.0fms" % (a, b) for a, b in slow])
 
+    # ★ 接口行为：「已是最新就不下载」必须由**接口**保证，不能只靠界面禁用按钮
+    #
+    # 先等后台检查跑完：前面的用例触发过 /api/check，它会异步重写 last-check.json。
+    # 不等就写会被它覆盖 —— 这条断言会变成看运气的（实测构建里输掉了这次竞态、本地侥幸赢了）。
+    for _ in range(200):
+        if not m.check_state()["running"]:
+            break
+        time.sleep(0.05)
+    os.makedirs(os.path.join(apps_root, "old-one"), exist_ok=True)
+    with open(os.path.join(apps_root, "old-one", "manifest"), "w", encoding="utf-8") as f:
+        f.write("appname               = old-one\nversion               = 1.0.0\n")
+    with open(os.path.join(var, "apps.json"), "w", encoding="utf-8") as f:
+        json.dump({"apps": [{"repo": "owner/repo", "appname": "installed-one"},
+                            {"repo": "owner/repo2", "appname": "old-one"}]}, f)
+    _up2date = {"appname": "installed-one", "display": "已最新", "installed": "1.2.3",
+                "latest": "1.2.3", "update_available": False, "error": None,
+                "sha256": "a" * 64, "downloaded": {"version": "1.2.3", "complete": True},
+                "local_unknown": None}
+    _older = {"appname": "old-one", "display": "有新版", "installed": "1.0.0",
+              "latest": "1.2.4", "update_available": True, "error": None,
+              "sha256": "a" * 64, "downloaded": None, "local_unknown": None}
+    with open(os.path.join(var, "last-check.json"), "w", encoding="utf-8") as f:
+        json.dump({"at": "2026-01-01T00:00:00+08:00", "trigger": "manual",
+                   "apps": [_up2date, _older]}, f)
+    _, code1, _, raw1 = call("/api/download", {"appname": "installed-one"}, reps=1)
+    chk(code1 == 409, "已是最新 → 接口拒绝下载（409，不只靠界面禁用）", code1)
+    chk("已经是最新" in raw1.decode("utf-8", "replace"),
+        "拒绝时给出可读原因", raw1.decode("utf-8", "replace")[:80])
+    _, code2, _, _ = call("/api/download", {"appname": "old-one"}, reps=1)
+    chk(code2 == 200, "有更新 → 接口放行", code2)
+
     # /api/check 必须是「立刻返回、后台跑」，不能等整轮检查
     t0 = time.time()
     call("/api/check", {"force": True}, reps=1)

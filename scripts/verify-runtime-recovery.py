@@ -470,6 +470,29 @@ def main():
     import shutil as _sh2
     _sh2.rmtree(dl2, ignore_errors=True)
 
+    # ── 6f. 「已是最新就不下载」──
+    print("▸ 已是最新就不下载（实测白下过 400MB）")
+    latest_ok = {"appname": "x", "installed": "1.2.3", "latest": "1.2.3",
+                 "update_available": False, "error": None,
+                 "downloaded": {"version": "1.2.3", "complete": True},
+                 "local_unknown": None}
+    chk(s.download_needed(latest_ok) is False,
+        "已是最新且本地包核对过 → 不需要下载", s.download_needed(latest_ok))
+    newer = dict(latest_ok, latest="1.2.4", update_available=True)
+    chk(s.download_needed(newer) is True, "有新版本 → 要下载")
+    chk(s.download_needed(dict(latest_ok, local_unknown={"name": "a.fpk", "size": 1,
+                                                        "reason": "内容与 Release 不一致"})) is True,
+        "本地同名包核对不过 → 允许重下（修包）")
+    chk(s.download_needed(dict(latest_ok, downloaded={"version": "1.2.3", "complete": False})) is True,
+        "本地包不完整 → 允许重下")
+    chk(s.download_needed(dict(latest_ok, error="检查失败：限流")) is True,
+        "状态不明（限流等）→ 不在这里拦")
+    chk(s.download_needed(None) is True, "没有检测结果 → 不拦")
+    chk(s.download_needed(dict(latest_ok, installed="1.2.0", downloaded=None)) is True,
+        "装的比最新旧 → 要下载")
+    chk(s.download_needed(dict(latest_ok, installed="9.9.9")) is True,
+        "钉了旧版本（比最新还旧的目标）→ 要下载（回滚是正经用途）")
+
     # ── 7. 自愈必须真的接在启动流程里（只定义不调用等于没修）──
     print("▸ 启动流程接线")
     import ast

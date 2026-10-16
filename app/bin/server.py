@@ -1387,6 +1387,39 @@ def _run_check_locked(trigger):
     return results
 
 
+def state_item(appname):
+    """从最近一次检测结果里取某个应用的那条。"""
+    for r in (cached_state().get("apps") or []):
+        if r.get("appname") == appname:
+            return r
+    return None
+
+
+def download_needed(item):
+    """这个应用现在还需不需要「下载 / 下载并更新」？
+
+    用户要求：**已经是最新的就不下载**。
+    实测踩过：6 个应用全是最新，却因为归档目录刚被清空而全部重新下了一遍 —— 白下 400MB。
+    逻辑上也不该下：包是用来升级的，已经是最新就没有升级可做。
+
+    唯一例外：本地有同名包但**内容核对不过**（旧版本 / 没下完 / 被改坏）——
+    那是「修包」而不是「更新」。不给这条出路的话，卡片上那条提示就没有出口。
+    """
+    if not item:
+        return True                     # 没有检测结果：不拦，让后面的流程给出具体原因
+    if item.get("error"):
+        return True                     # 状态不明（限流/仓库问题）：不在这里拦
+    latest = norm_version(item.get("latest") or "")
+    if not latest:
+        return True
+    inst = norm_version(item.get("installed") or "")
+    if inst and inst == latest and not item.get("update_available"):
+        dl = item.get("downloaded") or {}
+        # 例外：本地包核对不过、或已有包但不完整 → 允许重下（这是「修包」，不是「更新」）
+        return bool(item.get("local_unknown")) or dl.get("complete") is False
+    return True
+
+
 def cached_state():
     data = load_json(LAST_CHECK_FILE)
     if not isinstance(data, dict):
@@ -2748,6 +2781,14 @@ class Handler(BaseHTTPRequestHandler):
             if appname not in allowed:
                 return self._err(400, "该应用不在列表里")
             action = path.rsplit("/", 1)[1]
+            # 「已是最新就不下载」—— 界面会禁用按钮，但接口也必须拦：
+            # 界面不是唯一调用方（脚本、误触、旧缓存页面都能发这个请求）。
+            it = state_item(appname)
+            if action in ("download", "update") and not download_needed(it):
+                disp = (it or {}).get("display") or appname
+                return self._err(409, "「%s」已经是最新（%s），无需%s"
+                                      % (disp, (it or {}).get("installed") or "?",
+                                         "下载" if action == "download" else "下载或更新"))
             try:
                 tid = enqueue(appname, action)
             except ValueError as exc:
@@ -2772,9 +2813,9 @@ class Handler(BaseHTTPRequestHandler):
                 if action == "update":
                     ok = bool(r.get("update_available")) and not r.get("error")
                 else:
-                    dl = r.get("downloaded") or {}
-                    same = norm_version(dl.get("version") or "") == norm_version(r.get("latest") or "")
-                    ok = bool(r.get("latest")) and not r.get("error") and not (dl.get("complete") and same)
+                    # 同一判据：已是最新（且本地包没问题）就不排队，别白下几百 MB
+                    ok = (bool(r.get("latest")) and not r.get("error")
+                          and download_needed(r))
                 if not ok:
                     skipped.append(name)
                     continue

@@ -480,6 +480,50 @@ try {
 /* 差分渲染：状态没变时不许重建卡片。
    为什么值钱：每轮轮询都重建全部卡片 = 每次都新建 <img> = 重新取图标（6 个/轮，1 秒一轮），
    而且整块 DOM 反复销毁重建本身就是看得见的抖动。 */
+/* 已是最新就不给下载入口（白下过 400MB） */
+console.log('────────────────────────────────────────');
+console.log('▸ 已是最新时的按钮状态');
+try {
+  const mk = (over) => Object.assign({
+    appname: 'aa', display: 'AA', has_icon: false, installed: '1.0', latest: '1.0',
+    update_available: false, relation: 'same', size: 100, published_at: null,
+    error: null, downloaded: { version: '1.0', complete: true }, local_unknown: null,
+    notes: '', repo: 'o/n',
+  }, over || {});
+  const btnsOf = (app) => {
+    const card = sandbox.__renderCard(app);
+    const out = {};
+    const walk = (e) => {
+      if (e.tagName === 'BUTTON') out[e.textContent] = e;
+      (e.children || []).forEach(walk);
+    };
+    walk(card);
+    return out;
+  };
+  const up = btnsOf(mk());
+  const okUp = up['下载'].disabled === true && up['下载并更新'].disabled === true;
+  console.log(`  ${okUp ? '✔' : '✘'} 已是最新 → 「下载」「下载并更新」都禁用`);
+  if (!okUp) bad++;
+
+  const newer = btnsOf(mk({ latest: '1.1', update_available: true, relation: 'newer' }));
+  const okNew = newer['下载'].disabled === false && newer['下载并更新'].disabled === false;
+  console.log(`  ${okNew ? '✔' : '✘'} 有新版本 → 两个按钮都可点`);
+  if (!okNew) bad++;
+
+  const bad2 = btnsOf(mk({ local_unknown: { name: 'a.fpk', size: 10, reason: '内容与 Release 不一致（可能是旧版本或没下完）' } }));
+  const okBad = bad2['下载'].disabled === false;
+  console.log(`  ${okBad ? '✔' : '✘'} 本地包核对不过 → 留出重下出口（可以点）`);
+  if (!okBad) bad++;
+
+  const inc = btnsOf(mk({ downloaded: { version: '1.0', complete: false } }));
+  const okInc = inc['下载'].disabled === false;
+  console.log(`  ${okInc ? '✔' : '✘'} 本地包不完整 → 也可以重下`);
+  if (!okInc) bad++;
+} catch (e) {
+  console.log('  ✘ 抛异常 -> ' + e.message);
+  bad++;
+}
+
 console.log('────────────────────────────────────────');
 console.log('▸ 卡片差分渲染（状态不变就不重建）');
 try {
