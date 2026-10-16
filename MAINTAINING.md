@@ -97,7 +97,8 @@ socket：`/var/run/com.trim.app.center.sock`（`root:root`，组 `OfficialAppUse
     save_json 并发写临时名不撞
 14. 接口延迟（`verify-endpoint-latency.py`）：18 个接口逐个 < 200 ms；检查类接口立刻返回；图标可缓存
 15. 门禁自身不许空转（`verify-gates-reverse.py`）：逐条破坏上述修复点，确认每条都被拦住
-    （9 条破坏全绿才算过；这一步放在所有断言之前，因为门禁逻辑坏掉后别的断言都可能是假绿）
+    （脚本会打印破坏总数，**全部**被拦住才算过 —— 别在文档里记死的数字，它一直在涨）
+    这一步放在所有断言之前，因为门禁逻辑坏掉后别的断言都可能是假绿
 
 ## CI 与发布（GitHub Actions）
 
@@ -223,6 +224,22 @@ socket：`/var/run/com.trim.app.center.sock`（`root:root`，组 `OfficialAppUse
   本应用的处理是**如实的**：比对本地文件大小与 Release 的 `size`，不一致就标
   「文件不完整」并禁用「安装」，要用户重新下载（绝不拿来源不明的包去装）。
   根治要在 CI 侧：已发布的「版本号 + 架构」文件应视为不可变，内容变了必须发新版本号。
+- **keep-alive 上没读完的请求体会变成「下一个请求的开头」**（实测 2026-10-17，用户手机上报
+  「请求失败（HTTP 501 · /api/state）」）：`POST /api/tasks/clear` 带 `{}` 体而路由没读，
+  残留字节与紧随其后的 `GET /api/state` 粘连，被 http.server 解析成方法 `{}GET` → 501
+  Unsupported method。因为前端 `api()` 对**每个** POST 都带 `{}` 体，凡是不调用 `_read_body`
+  的路由都是地雷（当时有三条 + 403/404 早退路径）。修法：**请求体在 do_POST 分发前中央消费**
+  （`_read_body` 幂等缓存，按请求在 `handle_one_request` 里重置缓存），任何路由漏读都不再
+  可能出问题；`Transfer-Encoding` 与非法 Content-Length 一律断开连接。回归测试在
+  `verify-endpoint-latency.py` 里用同一连接连发「清理 → 设置 → state」复现原场景。
+- **未安装应用（Scheme B）与桌面桥（microApp）**：未安装的仓库也能加进列表（可下载、
+  不可经本工具「更新/安装」——守护在 `/api/update|install` 路由层）；`/api/all` 批量跳过
+  未安装的应用。要「一键唤起应用中心」，本应用的 `ui/config` 需开 `"microApp": true`
+  ——桌面会给带此标记的 iframe 装上 Penpal 桥（父端 methods 里有 `openApp` 等），
+  前端按 `syn → synAck → ack → call('openApp', ['trim.app-center'])` 即可唤起应用中心的
+  窗口；两个坑：①握手要在**窗口打开后 60 秒内**完成——父端超时会**销毁连接**，所以必须
+  在页面 boot 时就 `syn`，不能等用户点按钮；②桥只在高版本桌面里存在，超时降级为文字
+  指引（「应用中心 → 手动安装 → 从 NAS 选包」），绝不把「没唤起」当失败。
 
 ## 打包者
 

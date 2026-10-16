@@ -1259,8 +1259,10 @@ def check_one(app, force=False):
         item["display"] = (rel.get("display_name") or item["manifest_display"]
                            or item["appname"])
     if not item["installed"]:
-        item["error"] = "未安装（本机没有 %s）" % item["appname"]
-        return item
+        # Scheme B：未安装 ≠ 错误。照常解析最新版本与附件（卡片可展示、安装包可下载），
+        # 只是不进升级链路 —— 初次安装要选存储空间、由应用中心的向导完成，
+        # 由 /api/update|install 的守卫与前端卡片交互共同保证。
+        item["uninstalled"] = True
 
     # 架构对不上就别动
     plat = (rel.get("platform") or "").strip().lower()
@@ -1276,10 +1278,14 @@ def check_one(app, force=False):
     item["sha256"] = rel.get("sha256") or ""
     item["version_source"] = rel.get("version_source") or ""
     item["tag"] = rel.get("tag") or ""
-    item["update_available"] = is_newer(rel["version"], item["installed"])
-    # 关系：钉住的版本可能比已装的旧（用于回滚）—— 界面据此显示不同徽章
-    _c = cmp_version(rel["version"], item["installed"])
-    item["relation"] = {1: "newer", 0: "same", -1: "older"}.get(_c, "unknown")
+    if item.get("uninstalled"):
+        item["update_available"] = False
+        item["relation"] = "uninstalled"
+    else:
+        item["update_available"] = is_newer(rel["version"], item["installed"])
+        # 关系：钉住的版本可能比已装的旧（用于回滚）—— 界面据此显示不同徽章
+        _c = cmp_version(rel["version"], item["installed"])
+        item["relation"] = {1: "newer", 0: "same", -1: "older"}.get(_c, "unknown")
     if not item["sha256"]:
         item["error"] = ("该来源没有 sha256 摘要，出于安全不会下载/安装"
                          "（可改用仓库来源，GitHub 的 Release 附件一般带 digest）")
@@ -1519,6 +1525,13 @@ def download_needed(item):
     latest = norm_version(item.get("latest") or "")
     if not latest:
         return True
+    if item.get("uninstalled"):
+        # 未安装：需要的只是「一份能拿去应用中心安装的、已核对过的包」。
+        # 本地已有这一版且完整 → 不用重复下载；否则（含内容对不上的同名外来文件）
+        # 允许下载 —— 用已校验的那份覆盖它。
+        dl = item.get("downloaded") or {}
+        return not (bool(dl.get("complete"))
+                    and norm_version(dl.get("version") or "") == latest)
     inst = norm_version(item.get("installed") or "")
     if inst and inst == latest and not item.get("update_available"):
         dl = item.get("downloaded") or {}
@@ -2741,6 +2754,16 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "FPKUpdate/1.0"
     protocol_version = "HTTP/1.1"
 
+    def handle_one_request(self):
+        """每条请求开始前重置请求体缓存。
+
+        同一个连接（keep-alive）会复用同一个 Handler 实例连续处理多条请求，
+        而请求体缓存必须按请求隔离 —— 否则上一请求的 body 会串给下一请求
+        （表现为「设置改了却没生效」「莫名 501」这类难查的怪行为）。
+        挂在 handle_one_request 上：它是每条请求（无论方法）必然经过的唯一入口。"""
+        self._body_cache = None
+        super().handle_one_request()
+
     # ── 小工具 ──
     def _send(self, code, body=b"", ctype="application/json; charset=utf-8", extra=None):
         if isinstance(body, str):
@@ -2774,29 +2797,52 @@ class Handler(BaseHTTPRequestHandler):
         return self.headers.get("X-Requested-With") == "fpk-update"
 
     def _read_body(self):
-        """读请求体。
+        """读请求体（幂等：每条请求只真正读一次，重复调用返回缓存）。
 
-        关键约束：**读不完就必须断开连接**。HTTP/1.1 是长连接，socket 里剩下的字节会被
-        BaseHTTPRequestHandler 当成下一条请求行解析 —— 表现为「同一条连接上的后续请求
-        莫名 400/垃圾响应」。本应用的请求体都是几十字节，所以超限直接拒并断开最干脆。
+        两条硬约束（都是实测踩出来的）：
+
+        1. **读不完就必须断开连接**。HTTP/1.1 是长连接，socket 里剩下的字节会被
+           BaseHTTPRequestHandler 当成下一条请求行解析。2026-10-16 实测：前端
+           「清理已完成」发 POST /api/tasks/clear（带 `{}` 体）而该路由没读过
+           body，紧接着的 GET /api/state 被解析成方法 `{}GET` → 回
+           `501 Unsupported method` —— 用户在手机上看到的就是
+           「请求失败（HTTP 501 · /api/state）」。
+        2. **任何路径都不得漏读**。do_POST 在分发前会先调一次本函数
+           （中央消费），所有路由（包括 403/404 早退）都不会在 socket 里
+           留下残余字节；路由内部的调用全部是缓存命中。
         """
+        if self._body_cache is not None:
+            return self._body_cache
+        # Transfer-Encoding（chunked 等）无法可靠地"读干净"：直接断开连接最安全。
+        # 浏览器 fetch 发字符串体永远走 Content-Length，这条只是兜底。
+        if self.headers.get("Transfer-Encoding"):
+            self.close_connection = True
+            self._body_cache = {}
+            return self._body_cache
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             # Content-Length 本身不合法：无法知道还有多少字节没读 → 断开
             self.close_connection = True
-            return {}
+            self._body_cache = {}
+            return self._body_cache
         if n <= 0:
-            return {}
+            self._body_cache = {}
+            return self._body_cache
         if n > MAX_BODY_BYTES:
             log("请求体过大（%d 字节 > %d），拒绝并断开连接：%s"
                 % (n, MAX_BODY_BYTES, self.path))
             self.close_connection = True
-            return {}
+            self._body_cache = {}
+            return self._body_cache
         try:
-            return json.loads(self.rfile.read(n).decode("utf-8"))
+            parsed = json.loads(self.rfile.read(n).decode("utf-8"))
         except ValueError:
-            return {}
+            parsed = {}
+        # 各路由都按 dict 用 body（body.get(...)）：非 dict 的垃圾体归一成 {}，
+        # 否则会 AttributeError → 500（之前 body 为 null/[1] 时就是这样）。
+        self._body_cache = parsed if isinstance(parsed, dict) else {}
+        return self._body_cache
 
     # ── 路由 ──
     def do_HEAD(self):
@@ -2820,7 +2866,11 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _method_not_allowed(self):
-        """其它方法（PUT/DELETE/PATCH…）：明确回 405 JSON，不要回 501 HTML。"""
+        """其它方法（PUT/DELETE/PATCH…）：明确回 405 JSON，不要回 501 HTML。
+
+        顺带断开连接：这些方法可能带请求体而我们不读 —— keep-alive 留着
+        残余字节就是下一次「莫名 501」的种子。"""
+        self.close_connection = True
         self._json({"ok": False, "error": "不支持 %s 方法（本应用只有 GET / POST / OPTIONS）"
                                        % self.command}, code=405,
                    extra={"Allow": "GET, POST, HEAD, OPTIONS"})
@@ -2849,6 +2899,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            # ── 中央消费请求体（先于一切路由判断）──
+            # 为什么放这里：HTTP/1.1 keep-alive 下，服务端没读完的请求体会被当成
+            # 下一条请求的起始字节。2026-10-16 实测：POST /api/tasks/clear 没读
+            # body，紧随其后的 GET /api/state 被解析成方法 `{}GET` → 501，
+            # 手机上表现为「请求失败（HTTP 501 · /api/state）」。
+            # 放在分发前、连 403/404 都不例外 —— 任何分支都不会再留残余字节。
+            self._read_body()
             self._route_post()
         except BrokenPipeError:
             pass
@@ -3034,11 +3091,23 @@ class Handler(BaseHTTPRequestHandler):
             if appname not in allowed:
                 return self._err(400, "该应用不在列表里")
             action = path.rsplit("/", 1)[1]
+            it = state_item(appname)
+            # 未安装的应用只有「下载安装包」一条路：初次安装要选存储空间、走应用中心
+            # 的安装向导（本应用刻意不代装 —— daemon 的 update 通道是给已装应用就地
+            # 升级用的）。这里必须拦：界面不是唯一调用方，脚本/旧缓存页面都能发请求。
+            if action in ("update", "install") and not installed_version(appname):
+                disp = (it or {}).get("display") or appname
+                return self._err(409, "「%s」还没安装：初次安装需要选存储空间、由应用中心的"
+                                      "安装向导完成。请先点「下载安装包」，再到应用中心手动安装。"
+                                      % disp)
             # 「已是最新就不下载」—— 界面会禁用按钮，但接口也必须拦：
             # 界面不是唯一调用方（脚本、误触、旧缓存页面都能发这个请求）。
-            it = state_item(appname)
             if action in ("download", "update") and not download_needed(it):
                 disp = (it or {}).get("display") or appname
+                if (it or {}).get("uninstalled"):
+                    return self._err(409, "「%s」的安装包已经下好了（%s），无需重复下载；"
+                                          "到应用中心手动安装即可"
+                                          % (disp, (it or {}).get("latest") or "?"))
                 return self._err(409, "「%s」已经是最新（%s），无需%s"
                                       % (disp, (it or {}).get("installed") or "?",
                                          "下载" if action == "download" else "下载或更新"))
@@ -3091,6 +3160,12 @@ class Handler(BaseHTTPRequestHandler):
             for r in results:
                 name = r.get("appname")
                 if not name:
+                    continue
+                if r.get("uninstalled"):
+                    # 未安装的包不进批量：它的包是「安装用」而不是「升级用」，
+                    # 单独下载（卡片上就有按钮）更符合预期，也避免「全部下载」
+                    # 顺手下几百 MB 用户没打算现在装的东西。
+                    skipped.append("%s（未安装，需单独下载）" % name)
                     continue
                 if action == "update":
                     ok = bool(r.get("update_available")) and not r.get("error")
@@ -3311,12 +3386,11 @@ class Handler(BaseHTTPRequestHandler):
             # 用户看到「已添加」但列表里什么都没有 —— 说不清到底发生了什么。
             if not APPNAME_RE.match(appname or ""):
                 return self._err(400, "安装包内的应用名不合法（%r），拒绝添加" % appname)
-            # 只能管理「本机已安装」的应用 —— 硬边界
-            if not installed_version(appname):
-                disp = rel.get("display_name") or appname
-                return self._err(400, "该仓库对应的应用是「%s」（%s），但你的飞牛 NAS 上尚未安装它。\n"
-                                      "提示：本更新器用于已安装应用的持续升级与回滚；初次安装应用请先通过应用中心完成。"
-                                      % (disp, appname))
+            # 未安装的应用也允许加入（Scheme B）：列表先把它管起来 —— 可以先看版本、
+            # 下载安装包；「更新/安装」链路后端有专门守卫（初次安装必须走应用中心向导，
+            # 因为要选存储空间），不会误触。加进来后等用户在应用中心装好，
+            # 检测会自然把它转成正常的「已装」状态。
+            was_installed = bool(installed_version(appname))
             with _lock:
                 doc = _whitelist_doc()
                 for item in doc["apps"]:
@@ -3337,9 +3411,11 @@ class Handler(BaseHTTPRequestHandler):
                     new_item["asset"] = src["asset"]
                 doc["apps"].append(new_item)
                 save_whitelist(doc)
-            log("新增被管理应用：%s（来源 %s，版本 %s，包 %s）"
-                % (appname, src["repo"] or src["url"], rel["version"], rel["asset_name"]))
-            return self._json({"ok": True, "appname": appname, "apps": load_whitelist()})
+            log("新增被管理应用：%s（来源 %s，版本 %s，包 %s%s）"
+                % (appname, src["repo"] or src["url"], rel["version"], rel["asset_name"],
+                   "" if was_installed else "，本机未安装"))
+            return self._json({"ok": True, "appname": appname, "installed": was_installed,
+                               "apps": load_whitelist()})
 
         if path == "/api/apps/pin":
             # 给已有条目换版本 / 换安装包（不改来源）

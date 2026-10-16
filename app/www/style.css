@@ -492,17 +492,28 @@ code {
 
 /* ── 手机端适配 ── */
 @media (max-width: 700px) {
-  /* 顶栏（模块1）：手机端统一正方触控按钮，标题更清爽 */
-  .topbar { padding: 10px max(13px, env(safe-area-inset-left)) 10px max(13px, env(safe-area-inset-right)); }
-  .brand { min-width: 0; flex: 1; }
+  /* 顶栏（模块1）：**两排布局** —— 第一排品牌+状态，第二排动作按钮。
+     为什么两排：五个按钮（含一键更新）+ 状态文字挤一行时，窄屏（实测 360dp）
+     会错位挤压；两排后每排都拿到整行宽度，任何宽度下都不再互相压。
+     第二排里「一键更新」占满剩余宽度（比图标按钮显眼，拇指也好点）。 */
+  .topbar {
+    padding: 10px max(13px, env(safe-area-inset-left)) 10px max(13px, env(safe-area-inset-right));
+    flex-wrap: wrap; row-gap: 9px;
+  }
+  .brand { min-width: 0; flex: 1 1 100%; }
   .brand-text strong { font-size: 15.5px; }
-  .brand-text .muted { font-size: 11.5px; max-width: 180px; }
-  .topbar-actions { gap: 6px; }
+  .brand-text .muted { font-size: 11.5px; max-width: none; }
+  .topbar-actions { flex: 1 1 100%; gap: 6px; }
   #add-btn span, #check-btn span, #settings-btn span, #clean-btn span { display: none; }
   #add-btn, #check-btn, #settings-btn, #clean-btn {
     width: 36px; height: 36px; padding: 0;
     display: inline-flex; align-items: center; justify-content: center;
     border-radius: 10px; flex: none;
+  }
+  /* 一键更新：第二排的主按钮，吃掉剩余宽度 */
+  #update-all-btn {
+    flex: 1 1 auto; min-width: 0; height: 36px;
+    padding: 0 14px; border-radius: 10px; font-size: 13px;
   }
 
   /* 提示条与卡片边距严格对齐（13px） */

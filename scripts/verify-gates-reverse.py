@@ -80,6 +80,29 @@ BREAKS = [
      "    if False:"),
     ("OPTIONS 预检不实现（退回 501）",
      "    def do_OPTIONS(self):", "    def do_OPTIONS_disabled(self):"),
+    # ── 长连接请求体消费（2026-10-16 实测的 501 根因，3 条）──
+    ("do_POST 不再中央消费请求体（残留字节污染下一请求）",
+     "            self._read_body()\n            self._route_post()",
+     "            self._route_post()"),
+    ("请求体缓存不按请求重置（上一请求的 body 串给下一请求）",
+     "        self._body_cache = None\n        super().handle_one_request()",
+     "        if not hasattr(self, \"_body_cache\"):\n            self._body_cache = None\n        super().handle_one_request()"),
+    ("非 dict 请求体不再归一（null 体让连接挂起）",
+     "        self._body_cache = parsed if isinstance(parsed, dict) else {}",
+     "        self._body_cache = parsed"),
+    # ── Scheme B：未安装的应用（2 条）──
+    ("未安装的仓库退回「只允许已安装」硬边界",
+     '''            # 未安装的应用也允许加入（Scheme B）：列表先把它管起来 —— 可以先看版本、
+            # 下载安装包；「更新/安装」链路后端有专门守卫（初次安装必须走应用中心向导，
+            # 因为要选存储空间），不会误触。加进来后等用户在应用中心装好，
+            # 检测会自然把它转成正常的「已装」状态。
+            was_installed = bool(installed_version(appname))''',
+     '''            if not installed_version(appname):
+                return self._err(400, "破坏：退回只允许已安装应用")
+            was_installed = True'''),
+    ("未安装应用的更新/安装守卫被摘掉",
+     '            if action in ("update", "install") and not installed_version(appname):',
+     "            if False:"),
     ("有本地包也强制重新下载", "        if not known and _local_sha256_cached(cand) != rel[\"sha256\"]:",
      "        if True:"),
     ("共享判定失效（重启后不再认「已装好」）",

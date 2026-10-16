@@ -215,6 +215,99 @@ def main():
     chk(b"ok" in body_put and "不支持".encode() in body_put,
         "405 也是 JSON 且说明原因", body_put[:60])
 
+    # ★ 长连接上的请求体必须被消费干净（2026-10-16 实测的 501 根因）：
+    #   POST 带 `{}` 体而某个路由没读 → 残留字节和下一个请求粘连，被解析成
+    #   方法 `{}GET` → 501。手机上「清理已完成」后的 /api/state 就这么挂的。
+    #   这一组用同一条连接连发：清理 → 设置改主题 → GET /api/state，三段全部必须干净。
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    c.request("POST", "/api/tasks/clear", body=b"{}", headers=HDR)
+    r = c.getresponse(); r.read(); code_clr = r.status
+    c.request("POST", "/api/settings", body=b'{"theme": "dark"}', headers=HDR)
+    r = c.getresponse(); body_set = r.read(); code_set = r.status
+    c.request("GET", "/api/state", headers=HDR)
+    r = c.getresponse(); r.read(); code_st = r.status
+    c.close()
+    chk(code_clr == 200, "POST /api/tasks/clear 正常", code_clr)
+    chk(code_set == 200 and b'"theme": "dark"' in body_set,
+        "同一连接上下一个 POST 的 body 被正确读取（缓存按请求隔离）",
+        (code_set, body_set[:80]))
+    chk(code_st == 200, "POST 后同连接 GET 不 501（请求体被消费，无残留字节）", code_st)
+
+    # 403 早退路径也不能留残余字节
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    c.request("POST", "/api/tasks/clear", body=b"{}",
+              headers={"Content-Type": "application/json"})      # 故意缺自定义头 → 403
+    r = c.getresponse(); r.read(); code_403 = r.status
+    c.request("GET", "/api/state", headers=HDR)
+    r = c.getresponse(); r.read(); code_after = r.status
+    c.close()
+    chk(code_403 == 403, "缺自定义头的 POST 回 403", code_403)
+    chk(code_after == 200, "403 拒绝后同连接下一个请求不受污染", code_after)
+
+    # 垃圾体（json null）不得把接口打成 500、也不得让连接挂起：
+    # 归一成 {} 后，后续请求必须照常（改主题 → 看是否生效 → GET）。
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        c.request("POST", "/api/settings", body=b"null", headers=HDR)
+        r = c.getresponse(); r.read(); code_null = r.status
+        c.request("POST", "/api/settings", body=b'{"theme": "light"}', headers=HDR)
+        r = c.getresponse(); body_ok = r.read(); code_ok = r.status
+        hang = False
+    except (socket.timeout, TimeoutError):
+        code_null = code_ok = None
+        hang = True
+    finally:
+        c.close()
+    chk(not hang and code_null == 200, "请求体为 null 不炸（归一成 {}）", "挂起" if hang else code_null)
+    chk(not hang and code_ok == 200 and b'"theme": "light"' in (body_ok if not hang else b""),
+        "null 体之后的正常请求不受影响", code_ok)
+
+    # ── Scheme B：未安装的应用（添加放行 / 更新拒绝 / 下载放行 / 批量跳过）──
+    print("▸ 未安装的应用（Scheme B）")
+    _rs_stub = m.resolve_source
+    m.resolve_source = (lambda entry, force=False:
+                        dict(_rs_stub(entry, force=force),
+                             appname="not-yet-app", display_name="NotYet"))
+    try:
+        _, c_add2, _, _ = call("/api/apps/add", {"source": "owner/newrepo"}, reps=1)
+    finally:
+        m.resolve_source = _rs_stub
+    chk(c_add2 == 200, "未安装的应用仓库可以直接添加（不再 400 硬边界）", c_add2)
+    _wl = json.load(open(os.path.join(var, "apps.json"), encoding="utf-8"))
+    chk(any(a.get("appname") == "not-yet-app" for a in _wl["apps"]),
+        "添加结果写进了列表（等装好自动转正）")
+
+    _, c_upd2, _, raw_upd2 = call("/api/update", {"appname": "not-yet-app"}, reps=1)
+    chk(c_upd2 == 409, "未安装的应用点「更新」被接口拒绝（界面不是唯一调用方）", c_upd2)
+    chk("应用中心" in raw_upd2.decode(), "拒绝信息里说清去哪里装（应用中心）",
+        raw_upd2.decode()[:80])
+    _, c_ins2, _, _ = call("/api/install", {"appname": "not-yet-app"}, reps=1)
+    chk(c_ins2 == 409, "未安装的应用点「安装」同样被拒绝", c_ins2)
+    _, c_dl2, _, raw_dl2 = call("/api/download", {"appname": "not-yet-app"}, reps=1)
+    chk(c_dl2 == 200, "未安装的应用「下载安装包」放行（入队）", c_dl2)
+
+    # 批量动作跳过未安装的（包是安装用的，单独下载更符合预期）
+    with open(os.path.join(var, "last-check.json"), "w", encoding="utf-8") as f:
+        json.dump({"at": "2026-01-01T00:00:00+08:00", "trigger": "seed",
+                   "apps": [
+                       {"appname": "installed-one", "display": "已最新", "installed": "1.2.3",
+                        "latest": "1.2.3", "update_available": False, "error": None,
+                        "sha256": "a" * 64, "downloaded": None, "local_unknown": None},
+                       {"appname": "not-yet-app", "display": "NotYet", "installed": None,
+                        "latest": "1.0.0", "update_available": False, "error": None,
+                        "uninstalled": True, "sha256": "a" * 64,
+                        "downloaded": None, "local_unknown": None}],
+                   "self": None}, f)
+    _, c_all2, _, raw_all2 = call("/api/all", {"action": "download"}, reps=1)
+    _body_all2 = json.loads(raw_all2)
+    chk(c_all2 == 200 and any("未安装" in s for s in (_body_all2.get("skipped") or [])),
+        "批量下载跳过未安装的应用并给出原因", (_body_all2.get("skipped"), _body_all2.get("queued")))
+    chk("not-yet-app" not in (_body_all2.get("queued") or []),
+        "未安装的应用绝不出现在批量排队里", _body_all2.get("queued"))
+    # 清掉这条排队任务，别干扰后面的用例
+    with open(os.path.join(var, "tasks.json"), "w", encoding="utf-8") as f:
+        json.dump({"seq": 0, "tasks": []}, f)
+
     # ★ /api/state 的兜底自愈也要认「其实装好了」（进程没起 worker 时走这条）
     with open(os.path.join(var, "tasks.json"), "w", encoding="utf-8") as f:
         json.dump({"seq": 1, "tasks": [

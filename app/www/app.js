@@ -70,6 +70,96 @@ async function api(path, opts = {}) {
   return data;
 }
 
+/* ── 飞牛桌面桥（微应用通道）──
+   让「打开应用中心安装」能真的把桌面上的应用中心窗口唤起来。
+   协议是飞牛桌面自带的双向 RPC（Penpal 同款）：
+     syn → synAck（父端回）→ ack（我们回）→ call/reply（我们调父端的 openApp 方法）。
+   只在「被桌面以微应用方式嵌入」时可用（ui/config 的 microApp:true）；
+   页面被独立浏览器打开、或桌面桥超时，全部走文字指引降级，不影响其他功能。 */
+const DesktopBridge = (() => {
+  let promise = null;                 // 惰性连接，只连一次
+  let seq = 0;
+  function connect() {
+    if (promise) return promise;
+    promise = new Promise((resolve) => {
+      if (!window.parent || window.parent === window) { resolve(null); return; }
+      let settled = false;
+      const finish = (v) => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('message', onMsg);
+        clearTimeout(timer);
+        resolve(v);
+      };
+      const timer = setTimeout(() => finish(null), 2000);
+      function onMsg(ev) {
+        const d = ev.data;
+        if (!d || typeof d !== 'object') return;
+        if (ev.source !== window.parent) return;          // 只认父窗口的应答
+        if (d.penpal !== 'synAck') return;
+        // 回 ACK 完成握手（methodNames 必填：我们不给桌面提供可调方法）
+        try {
+          window.parent.postMessage(
+            { penpal: 'ack', id: d.id, appName: d.appName, methodNames: [] }, '*');
+        } catch (e) { finish(null); return; }
+        finish({
+          call(method, args) {
+            return new Promise((res, rej) => {
+              const id = 'fpku-' + (++seq);
+              const tm = setTimeout(() => {
+                window.removeEventListener('message', onReply);
+                rej(new Error('桌面没有响应'));
+              }, 1500);
+              function onReply(re) {
+                const r = re.data;
+                if (re.source !== window.parent) return;
+                if (!r || typeof r !== 'object' || r.penpal !== 'reply' || r.id !== id) return;
+                clearTimeout(tm);
+                window.removeEventListener('message', onReply);
+                if (r.resolution === 'fulfilled') res(r.returnValue);
+                else rej(new Error('桌面拒绝了这次调用'));
+              }
+              window.addEventListener('message', onReply);
+              try {
+                window.parent.postMessage(
+                  { penpal: 'call', id, methodName: method, args: args || [] }, '*');
+              } catch (e) {
+                clearTimeout(tm);
+                window.removeEventListener('message', onReply);
+                rej(e);
+              }
+            });
+          },
+        });
+      }
+      window.addEventListener('message', onMsg);
+      try {
+        window.parent.postMessage({ penpal: 'syn', id: 'fpku-syn' }, '*');
+      } catch (e) { finish(null); }
+    });
+    return promise;
+  }
+  return { connect };
+})();
+
+/* 打开飞牛桌面的「应用中心」窗口（用于未安装应用的初次安装引导）。
+   成功唤起 → 告诉用户下一步怎么点；桥不可用 → 给纯文字指引。两者都不算失败。 */
+async function openAppCenter() {
+  const bridge = await DesktopBridge.connect();
+  if (!bridge) {
+    toast('请到飞牛桌面打开「应用中心」→ 手动安装 → 从 NAS 里选下载好的安装包', '', 7000);
+    return false;
+  }
+  try {
+    await bridge.call('openApp', ['trim.app-center']);
+    toast('已打开应用中心：点「手动安装」→ 从 NAS 选择下载好的安装包', 'ok', 7000);
+    return true;
+  } catch (e) {
+    toast('没能自动打开应用中心（' + e.message + '），请手动打开：应用中心 → 手动安装', 'err', 7000);
+    return false;
+  }
+}
+
 /* ── Toast ── */
 function toast(msg, kind = '', ms = 4200) {
   const el = document.createElement('div');
@@ -223,6 +313,11 @@ function statusBadge(app, task, running) {
     return badge(actionLabel(task.action) + (task.status === 'queued' ? '排队中' : '中'), 'new');
   }
   if (app.error && !app.latest) return badge('检查失败', 'err');
+  // 未安装：不是错误，是「等你装」的状态。徽章用中性色，别混进「有新版本」里。
+  if (app.uninstalled) {
+    return (app.downloaded && app.downloaded.complete)
+      ? badge('安装包已就绪', 'ok') : badge('未安装', 'wait');
+  }
   if (app.update_available) return badge('有新版本', 'new');
   // 有更新的版本、但不能自动更新（典型原因：该来源没有 sha256 摘要）。
   // 早先这种情况会掉到下面的「已是最新」——那是**误导**：明明有新版。
@@ -238,8 +333,9 @@ function versionRow(app) {
   const same = app.latest && normVer(app.latest) === normVer(app.installed);
 
   const c1 = el('div', 'c-cell');
-  c1.appendChild(el('span', 'c-label', '已装'));
-  c1.appendChild(el('span', 'c-val', app.installed || '—'));
+  // 未安装的卡片：第一格说「本机未安装」，不要写成「已装 —」（读起来像坏了）
+  c1.appendChild(el('span', 'c-label', app.uninstalled ? '本机' : '已装'));
+  c1.appendChild(el('span', 'c-val', app.uninstalled ? '未安装' : (app.installed || '—')));
   box.appendChild(c1);
 
   if (app.latest && !same) {
@@ -259,6 +355,26 @@ function versionRow(app) {
 
 /* 静态状态行：只在"本地有包"这类需要你知道的时候出现，且只有一条 */
 function staticState(app) {
+  // 未安装的应用：说清「包在不在本地、下一步怎么装」——初次安装必须走应用中心
+  if (app.uninstalled) {
+    const done = !!(app.downloaded && app.downloaded.complete);
+    const lu = app.local_unknown;
+    const cls = done ? 'ok' : (lu ? 'warn' : 'muted');
+    let text;
+    if (done) {
+      text = '安装包已下好：' + app.downloaded.version + '（' + fmtSize(app.downloaded.size)
+        + '）—— 点「打开应用中心安装」去装它';
+    } else if (lu) {
+      text = '本地同名文件' + (lu.reason ? '：' + lu.reason : '与这一版不一致')
+        + '（' + fmtSize(lu.size) + '）—— 点「下载安装包」会重新取一份覆盖它';
+    } else {
+      text = '初次安装由应用中心完成（装好后本工具自动接管更新与回滚）';
+    }
+    const row = el('div', 'c-state ' + cls);
+    row.appendChild(el('span', 'c-state-ico', done ? '↓' : (lu ? '!' : '·')));
+    row.appendChild(el('span', '', text));
+    return row;
+  }
   const d = app.downloaded;
   if (!d) return localUnknownRow(app);   // 有同名外来文件时，改为如实说明它是什么
   const differs = normVer(d.version) !== normVer(app.installed);
@@ -353,6 +469,23 @@ function renderCard(app) {
      **有已校验过的本地包就直接装、没有就先下载再装** —— 这个判断在后端做，不让用户选。
      换版本回滚（钉了旧版本、没新版可升）时按钮显示为「安装」，走同一条路。 */
   const actions = el('div', 'c-actions');
+
+  /* 未安装的应用（Scheme B）：只有一条路 —— 先下包，再到应用中心装。
+     按钮随状态自动切换：没包 →「下载安装包」；有包 →「打开应用中心安装」（桌面桥跳转）。 */
+  if (app.uninstalled) {
+    const ready = !!(app.downloaded && app.downloaded.complete);
+    const b = btn(ready ? '打开应用中心安装' : '下载安装包', 'primary sm',
+      ready ? () => openAppCenter()
+            : () => doAction(app, 'download', '下载安装包'),
+      ready ? '唤起桌面上的应用中心，到「手动安装」里选这个包'
+            : (app.latest ? ('把 ' + app.latest + ' 的安装包下到本地并校验 sha256')
+                          : '暂无可用版本'));
+    b.disabled = busy || !app.latest || (!!app.error && !ready);
+    actions.appendChild(b);
+    card.appendChild(actions);
+    return card;
+  }
+
   const upToDate = !!app.installed && !!app.latest
     && normVer(app.installed) === normVer(app.latest) && !app.update_available;
   const localReady = !!(app.downloaded && app.downloaded.complete);
@@ -755,7 +888,14 @@ async function doAll(action) {
   const apps = (state.apps || []).filter((a) => a.update_available);
   const names = apps.map((a) => a.display || a.appname).join('、');
   const what = action === 'update' ? '更新' : '下载';
-  if (!apps.length) { toast('没有可' + what + '的应用', 'err'); return; }
+  if (!apps.length) {
+    // 顶栏「一键更新」常驻可见，点它时「没有可更新的」是正常状态而不是错误 ——
+    // 用提示语气（不是红字报错），并告诉用户另有一个刷新动作可用。
+    toast(action === 'update'
+      ? '所有应用均已是最新，无需更新（想立刻复查可点「检查更新」）'
+      : '没有需要下载的应用（均为最新）', '');
+    return;
+  }
   const okAll = await askDialog({
     title: '对 ' + apps.length + ' 个应用执行「全部' + what + '」',
     rows: apps.map((a) => [[a.display || a.appname, a.update_available ? (a.installed + ' → ' + a.latest) : '']]),
@@ -1270,6 +1410,8 @@ $('speed-save').addEventListener('click', async () => {
 /* ── 分页/汇总/列表 ── */
 $('all-update').addEventListener('click', () => doAll('update'));
 $('all-download').addEventListener('click', () => doAll('download'));
+/* 顶栏「一键更新」：与汇总条的「全部更新」同一条链路（含应用内确认弹窗）。 */
+$('update-all-btn').addEventListener('click', () => doAll('update'));
 
 /* ── 安装包清理 ── */
 $('clean-btn').addEventListener('click', doClean);
@@ -1507,7 +1649,7 @@ $('app-preview-btn').addEventListener('click', async () => {
       r.installed
         ? (r.update_available ? ('可以更新：' + r.installed_version + ' → ' + r.version)
                               : ('当前已是最新（' + r.installed_version + '）'))
-        : ('✕ 本机没有安装「' + r.appname + '」，无法管理'),
+        : ('本机未安装：可添加后先下载安装包，再到应用中心完成初次安装'),
     ].join('\n');
   } catch (e) {
     box.textContent = '✕ ' + e.message;
@@ -1532,7 +1674,8 @@ $('app-confirm-btn').addEventListener('click', async () => {
         method: 'POST',
         body: { source: picker.source, tag: p.tag, asset: p.asset },
       });
-      toast('已加入 ' + (r.appname || ''), 'ok');
+      toast('已加入 ' + (r.appname || '')
+        + (r.installed === false ? '（本机未安装：可在卡片里先下载安装包）' : ''), 'ok', 6500);
       $('app-add-input').value = '';
     }
     $('app-picker').classList.add('hidden');
@@ -1596,6 +1739,10 @@ $('self-repo-save').addEventListener('click', async () => {
 
 /* ── 启动 ── */
 (async function boot() {
+  // 桌面桥要**开机就握手**，不能等用户点「打开应用中心安装」时才连：
+  // 桌面父端在 60 秒内等不到握手会销毁连接（之后本窗口再也连不上），
+  // 而用户点按钮往往在一分钟以后（实测路径）。失败也无妨，静默即可。
+  DesktopBridge.connect();
   try {
     await refresh();
     startPoll();

@@ -187,7 +187,8 @@ grep -q 'btn-spin' "$TMP/www/style.css" || fail "CSS 缺少转圈动画"
 # 定位必须写清楚（这是"这个应用到底是什么"的唯一说明，别改成含糊的营销话）
 grep -q 'GitHub 上 fpk 的下载更新器' "$TMP/manifest" || fail "manifest 缺少一句话定位"
 grep -q 'GitHub 上 fpk 的下载更新器' "$TMP/wizard/install" || fail "安装向导缺少一句话定位"
-grep -q '只更新本机已安装的应用' "$TMP/manifest" || fail "manifest 缺少「只更新已安装应用」这条边界"
+grep -q '安装永远由你点' "$TMP/manifest" || fail "manifest 缺少「安装永远由你点」这条边界"
+grep -q '应用中心安装' "$TMP/manifest" || fail "manifest 缺少「初次安装走应用中心」这条底线（Scheme B：可下包、不代装）"
 # 自审修的那几条也要钉住（否则以后会被改回去）
 grep -q 'Cache-Control' "$TMP/bin/server.py" || fail "静态资源缺少 no-cache（升级后可能用旧界面）"
 grep -q 'AUTO_DL_RETRY_SEC' "$TMP/bin/server.py" || fail "自动下载缺少重试退避（坏包会被反复重试）"
