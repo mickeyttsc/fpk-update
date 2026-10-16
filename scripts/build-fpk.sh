@@ -105,10 +105,21 @@ else
     echo "── 使用 tar+gzip 构建（与本仓库 CI 同一条路）──"
     (
         cd "$BUILD_ROOT"
-        APP_ENTRIES="$(cd app && ls -A)"
-        [ -n "$APP_ENTRIES" ] || { echo "::error:: app/ 目录为空"; exit 1; }
-        # shellcheck disable=SC2086
-        tar --owner=root --group=root --mtime='@0' -cf - -C app ${APP_ENTRIES} | gzip -n > app.tgz
+        # LC_ALL=C 固定排序：`ls` 的排序随 locale 变，会让 tar 里的目录条目顺序不同，
+        # 于是同一个源码在 CI 与本机打出**不同的字节**（实测踩过：内容全同、顺序不同）。
+        # 条目顺序必须完全确定，且**逐字节可复现**：
+        # 只固定顶层名字不够 —— tar 递归进目录时用的是文件系统 readdir 顺序，
+        # 两台机器不一样（实测 CI 与本机打出的 app.tgz 内容全同、条目顺序不同 → 字节不同）。
+        # 所以这里显式列出整棵树的、按 LC_ALL=C 排好序的清单，并用 --no-recursion 让 tar
+        # 严格照单执行，不再自己走目录。
+        APP_LIST="$(mktemp)"
+        ( cd app && find . -mindepth 1 -printf '%P\0' | LC_ALL=C sort -z > "$APP_LIST" )
+        [ -s "$APP_LIST" ] || { echo "::error:: app/ 目录为空"; exit 1; }
+        # -C 与 -T 都是位置敏感参数：-C 必须在 -T 之前，否则它不生效（tar 会警告
+        # "has no effect" 并按当前目录找文件，全部 Cannot stat）。
+        tar --owner=root --group=root --mtime='@0' --no-recursion -C app \
+            --null -T "$APP_LIST" -cf - | gzip -n > app.tgz
+        rm -f "$APP_LIST"
         # 注意：不要写 `tar tzf ... | head -1` —— head 先退出会让 tar 吃到 SIGPIPE，
         # 在 `set -o pipefail` 下整个构建会以 141 静默死掉（实测踩过）。
         # sed -n '1p' 会把输入读完，不会提前关闭管道。
