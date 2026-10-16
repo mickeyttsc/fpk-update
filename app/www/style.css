@@ -355,7 +355,7 @@ code {
   border: 1px solid var(--line); border-radius: 18px; padding: 20px;
   box-shadow: var(--shadow);
 }
-.modal-card.wide { max-width: 560px; }
+.modal-card.wide { max-width: 620px; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .modal-head h3 { margin: 0; font-size: 17px; }
 
@@ -413,25 +413,40 @@ code {
 .kv > span:first-child { color: var(--fg-muted); flex: none; min-width: 84px; }
 
 /* 被管理的应用列表 */
-.applist { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 2px; }
+.applist { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 2px; }
 .approw {
-  display: flex; align-items: center; gap: 9px;
-  padding: 8px 11px; border: 1px solid var(--line); border-radius: 10px;
-  background: var(--bg); font-size: 13px;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: 11px;
+  background: var(--bg); font-size: 13px; min-width: 0;
 }
-.approw .nm { font-weight: 500; flex: none; }
-.approw .an { color: var(--fg-muted); font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; flex: none; }
-.approw .src { flex: 1; min-width: 0; color: var(--fg-muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.approw .rm {
-  appearance: none; border: 1px solid var(--line); background: transparent;
-  color: var(--fg-muted); border-radius: 8px; padding: 3px 9px; font-size: 12px;
-  cursor: pointer; flex: none;
+.approw-main {
+  display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0; flex-wrap: wrap;
 }
-.approw .rm:hover { border-color: var(--err); color: var(--err); }
-.approw .tagchip {
+.approw-main .nm { font-weight: 500; flex: none; color: var(--fg); }
+.approw-main .an {
+  color: var(--fg-muted); font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px; flex: none; padding: 1px 5px; border-radius: 5px;
+  background: var(--line-soft);
+}
+.approw-main .src {
+  flex: 0 1 auto; max-width: 190px; color: var(--fg-muted); font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.approw-main .tagchip {
   font-size: 11px; padding: 1px 6px; border-radius: 6px;
   background: var(--line-soft); color: var(--fg-muted); flex: none;
+  max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.approw-ops {
+  display: flex; align-items: center; gap: 6px; flex: none;
+}
+.approw-ops .rm {
+  appearance: none; border: 1px solid var(--line); background: var(--bg-soft);
+  color: var(--fg-muted); border-radius: 8px; padding: 4px 10px; font-size: 12px;
+  cursor: pointer; flex: none; transition: border-color .15s, color .15s;
+}
+.approw-ops .rm:hover { border-color: var(--accent); color: var(--accent); }
+.approw-ops .rm.danger-hover:hover { border-color: var(--err); color: var(--err); }
 
 /* 版本 / 安装包 选择器 */
 .picker {
@@ -574,9 +589,11 @@ code {
   .row { gap: 6px; }
   .row > input { padding: 8px 10px; font-size: 13px; }
   .set-hint { font-size: 11.5px; }
-  .approw { flex-wrap: wrap; padding: 8px 10px; gap: 6px 8px; }
-  .approw .src { flex-basis: 100%; }
-  .approw .rm { padding: 4px 10px; font-size: 12px; }
+  .approw { flex-wrap: wrap; padding: 9px 11px; gap: 8px; }
+  .approw-main { flex-basis: 100%; }
+  .approw-main .src { max-width: 100%; }
+  .approw-ops { margin-left: auto; width: 100%; justify-content: flex-end; }
+  .approw-ops .rm { padding: 5px 12px; }
   .taskrow { padding: 8px 10px; }
   .selwrap { flex-wrap: wrap; }
   .selwrap > span { min-width: 100%; }

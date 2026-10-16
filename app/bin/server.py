@@ -3313,8 +3313,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(400, "安装包内的应用名不合法（%r），拒绝添加" % appname)
             # 只能管理「本机已安装」的应用 —— 硬边界
             if not installed_version(appname):
-                return self._err(400, "该安装包对应应用 %s，但本机没有安装它，无法管理"
-                                      "（本工具只更新已安装的应用）" % appname)
+                disp = rel.get("display_name") or appname
+                return self._err(400, "该仓库对应的应用是「%s」（%s），但你的飞牛 NAS 上尚未安装它。\n"
+                                      "提示：本更新器用于已安装应用的持续升级与回滚；初次安装应用请先通过应用中心完成。"
+                                      % (disp, appname))
             with _lock:
                 doc = _whitelist_doc()
                 for item in doc["apps"]:

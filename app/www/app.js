@@ -882,27 +882,37 @@ function renderAppsList(list) {
     const row = document.createElement('div');
     row.className = 'approw';
 
+    // 左侧元数据主区：标题 + appname + 来源 + 标签
+    const main = document.createElement('div');
+    main.className = 'approw-main';
+
     const nm = document.createElement('span');
     nm.className = 'nm';
     nm.textContent = it.display || it.appname || '(未识别)';
-    row.appendChild(nm);
+    main.appendChild(nm);
 
     if (it.appname) {
       const an = document.createElement('span');
       an.className = 'an';
       an.textContent = it.appname;
-      row.appendChild(an);
+      main.appendChild(an);
     }
 
     const src = document.createElement('span');
     src.className = 'src';
     src.textContent = it.repo || it.url || '';
     src.title = src.textContent;
-    row.appendChild(src);
+    main.appendChild(src);
 
-    if (it.tag) row.appendChild(chipSmall('tag ' + it.tag));
-    if (it.asset) row.appendChild(chipSmall('包 ' + it.asset));
-    if (it.allow_prerelease) row.appendChild(chipSmall('含预发布'));
+    if (it.tag) main.appendChild(chipSmall('tag ' + it.tag));
+    if (it.asset) main.appendChild(chipSmall('包 ' + it.asset));
+    if (it.allow_prerelease) main.appendChild(chipSmall('含预发布'));
+
+    row.appendChild(main);
+
+    // 右侧操作按钮组：独立容器且 flex: none，绝对不参与挤压和溢出
+    const ops = document.createElement('div');
+    ops.className = 'approw-ops';
 
     // 换版本：把来源填回输入框并列出它的所有版本/安装包，供手动改钉
     const repin = document.createElement('button');
@@ -920,10 +930,10 @@ function renderAppsList(list) {
         toast(e.message, 'err');
       }
     });
-    row.appendChild(repin);
+    ops.appendChild(repin);
 
     const rm = document.createElement('button');
-    rm.className = 'rm';
+    rm.className = 'rm danger-hover';
     rm.textContent = '移除';
     rm.addEventListener('click', async () => {
       const who = it.display || it.appname || it.repo || it.url;
@@ -931,6 +941,7 @@ function renderAppsList(list) {
         title: '不再管理「' + who + '」',
         notes: ['只会把它从列表里去掉，不会卸载应用、也不会删任何文件。'],
         okText: '移除',
+        danger: true,
       }))) return;
       try {
         await api('/api/apps/remove', { method: 'POST', body: { source: it.repo || it.url, appname: it.appname } });
@@ -939,8 +950,9 @@ function renderAppsList(list) {
         doCheck($('check-btn'));
       } catch (e) { toast(e.message, 'err'); }
     });
-    row.appendChild(rm);
+    ops.appendChild(rm);
 
+    row.appendChild(ops);
     box.appendChild(row);
   });
 }
