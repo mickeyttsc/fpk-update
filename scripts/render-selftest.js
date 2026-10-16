@@ -74,6 +74,7 @@ if (!idSet.has('toasts')) idSet.add('toasts');      // 兜底：#toasts 在 inde
 const document = {
   body: null,
   createElement: makeEl,
+  createTextNode: (s) => ({ tagName: '#text', textContent: String(s), children: [] }),
   getElementById: (id) => {
     if (htmlIds.length && !idSet.has(id)) return null;
     return _els[id] || (_els[id] = makeEl('div'));
@@ -843,6 +844,64 @@ try {
     const bg = await p4;
     console.log(`  ${bg === false ? '✔' : '✘'} 点弹窗外遮罩 → 取消`);
     if (bg !== false) bad++;
+
+    // ── 安装参数表单（v1.3）：字段渲染 + 规则校验拦截 + 确认取值 ──
+    const collect = (node, tag, acc) => {
+      if (node.tagName === tag) acc.push(node);
+      (node.children || []).forEach((c) => collect(c, tag, acc));
+      return acc;
+    };
+    let got = null;
+    const p5 = sandbox.__askDialog({
+      title: '下载并安装「X」',
+      fields: [
+        { type: 'text', id: 'f_port', label: '端口', value: '47939',
+          rules: [{ required: true, message: '请填端口' },
+                  { pattern: '^[0-9]+$', message: '必须是数字' },
+                  { min: 1, max: 65535, message: '端口范围 1-65535' }] },
+        { type: 'password', id: 'f_key', label: '密码', value: '' },
+        { type: 'checkbox', id: 'f_on', label: '开启', value: 'true' },
+        { type: 'select', id: 'f_vol', label: '安装到', value: '2',
+          options: [{ value: '1', label: '存储空间 1' }, { value: '2', label: '存储空间 2' }] },
+        { type: 'tips', helpText: '一句提示' },
+      ],
+      onOk: (v) => { got = v; },
+    });
+    const bodyEl = sandbox.__els('cf-body');
+    const inputs = collect(bodyEl, 'INPUT', []);
+    const selects = collect(bodyEl, 'SELECT', []);
+    const okRender5 = inputs.length === 3 && selects.length === 1;
+    console.log(`  ${okRender5 ? '✔' : '✘'} 安装参数字段渲染（3 输入 + 1 下拉）  -> ${inputs.length}/${selects.length}`);
+    if (!okRender5) bad++;
+    const findInput = (ty) => collect(bodyEl, 'INPUT', []).find((i) => i.type === ty);
+    // 必填校验：清空端口 → 点确定不关窗、不出取值
+    findInput('text').value = '';
+    sandbox.__els('cf-ok')._fire('click');
+    await new Promise((r) => setTimeout(r, 20));
+    const stillOpen = !sandbox.__els('confirm-modal').classList.contains('hidden');
+    const errEl = collect(bodyEl, 'DIV', []).find((d) => String(d.textContent) === '请填端口');
+    const blocked1 = stillOpen && errEl && !errEl.classList.contains('hidden') && got === null;
+    console.log(`  ${blocked1 ? '✔' : '✘'} 必填校验不过 → 不关窗、显示错误、不回调`);
+    if (!blocked1) bad++;
+    // 格式校验：字母 → 仍不过（错误文案换成 pattern 的）
+    findInput('text').value = 'abc';
+    sandbox.__els('cf-ok')._fire('click');
+    await new Promise((r) => setTimeout(r, 20));
+    const errEl2 = collect(bodyEl, 'DIV', []).find((d) => String(d.textContent) === '必须是数字');
+    const blocked2 = !sandbox.__els('confirm-modal').classList.contains('hidden')
+      && errEl2 && !errEl2.classList.contains('hidden');
+    console.log(`  ${blocked2 ? '✔' : '✘'} 格式（pattern）校验不过 → 同样拦住`);
+    if (!blocked2) bad++;
+    // 合法值 → 关窗、取值齐全（含 checkbox 归一 true/false 与下拉）
+    findInput('text').value = '48080';
+    findInput('password').value = 'sec';
+    selects[0].value = '1';
+    sandbox.__els('cf-ok')._fire('click');
+    const ok5 = await p5;
+    const ok5vals = ok5 === true && got && got.f_port === '48080' && got.f_key === 'sec'
+      && got.f_on === 'true' && got.f_vol === '1';
+    console.log(`  ${ok5vals ? '✔' : '✘'} 填好点确定 → 取值齐全（文本/密码/勾选/下拉）  -> ${JSON.stringify(got)}`);
+    if (!ok5vals) bad++;
   } catch (e) {
     console.log('  ✘ 抛异常 -> ' + e.message);
     bad++;
