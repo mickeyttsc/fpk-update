@@ -94,6 +94,9 @@ FILE_BREAKS = [
      ""),
     ("续传不校验 Range", "bin/server.py",
      'getattr(r, "status", 200) != 206', "True"),
+    ("弹窗改回浏览器原生 confirm", "www/app.js",
+     "if (!(await askDialog(CONFIRM[action](app)))) return;",
+     "if (!confirm(CONFIRM[action](app))) return;"),
     ("前端确认框去掉 downloaded 兜底", "www/app.js",
      "((a.downloaded && a.downloaded.version) || a.latest || '?')",
      "a.downloaded.version"),
@@ -240,7 +243,9 @@ def main():
     if failures:
         print("✘ 有 %d 条破坏没被门禁拦住 —— 门禁不完整" % failures)
         return 1
-    print("✅ 全部 %d 条破坏都被门禁拦住（门禁不是空转）" % len(BREAKS))
+    total = len(BREAKS) - len(STRING_ONLY) + len(FILE_BREAKS) + len(FE_BREAKS)
+    print("✅ 全部 %d 条破坏都被门禁拦住（函数级 %d + 守卫级 %d + 前端 %d，门禁不是空转）"
+          % (total, len(BREAKS) - len(STRING_ONLY), len(FILE_BREAKS), len(FE_BREAKS)))
     return 0
 
 

@@ -66,6 +66,20 @@
   <span class="muted">升级走飞牛应用中心官方通道，保数据、不重装。被更新的应用会短暂重启。</span>
 </footer>
 
+<!-- 应用内确认弹窗：替代浏览器原生 confirm。
+     原生弹窗是浏览器的样式（方角、系统字体、不跟随应用深浅色），嵌在飞牛应用小窗里
+     跟应用完全不是一套东西。这里复用应用自己的弹窗骨架与主题变量。 -->
+<div class="modal hidden" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="cf-title">
+  <div class="modal-card cf">
+    <h3 id="cf-title">确认</h3>
+    <div class="cf-body" id="cf-body"></div>
+    <div class="cf-actions">
+      <button class="btn ghost" id="cf-cancel">取消</button>
+      <button class="btn primary" id="cf-ok">确定</button>
+    </div>
+  </div>
+</div>
+
 <!-- 设置：分页 -->
 <div class="modal hidden" id="settings-modal">
   <div class="modal-card wide">

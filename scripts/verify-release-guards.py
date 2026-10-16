@@ -84,6 +84,9 @@ def main():
         (srv, "_local_sha256_cached", "本地包按内容（sha256）认领，而不是只看谁下载的"),
         (srv, "def download_needed", "已是最新就不下载（后端判定）"),
         (js, "needDownload", "已是最新时界面也禁用「下载」"),
+        (js, "function askDialog", "应用内确认弹窗（替掉原生 confirm）"),
+        (js, "justDone", "任务刚结束时保持快轮询（避免卡片与结果条自相矛盾）"),
+        (open(os.path.join(app, "..", "www", "index.html")).read() if False else js, "cf-ok", "弹窗按钮接线"),
         (js, "lu.reason", "提示只在内容真的对不上时出现，并说清原因"),
         (srv, '"app_version"', "后端把本应用版本回给界面"),
         (js, "app-ver-chip", "顶栏常驻显示本应用版本"),
@@ -103,6 +106,20 @@ def main():
     print("▸ 修复点必须还在（%d 项）" % len(REQUIRED))
     for text, needle, label in REQUIRED:
         chk(needle in text, label, "缺少片段：%s" % needle)
+
+    # 必须**不存在**的东西（改回去就是回归）
+    ABSENT = [
+        (js, "confirm(", "不要再调用浏览器原生 confirm（要用应用内 askDialog）"),
+    ]
+    for text, needle, label in ABSENT:
+        chk(needle not in text, label, "出现了：%s" % needle)
+
+    # 确认弹窗的骨架必须在页面里（只有 JS 没有 DOM 会是个点不开的空壳）
+    html = read(os.path.join(app, "..", "www", "index.html")) or \
+        read(os.path.join(outer, "www", "index.html"))
+    if html:
+        chk('id="confirm-modal"' in html and 'id="cf-ok"' in html,
+            "页面里有确认弹窗骨架（#confirm-modal / #cf-ok）")
 
     # 密码类残留：wizard/ 与 cmd/ 都不许出现肯定式「密码」表述
     hits = []

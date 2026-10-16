@@ -275,7 +275,7 @@ function staticState(app) {
   return row;
 }
 
-/* 本地有同名文件、但不是本应用为这一版下载的（不认领它）。
+/* 本地同名文件与这一版对不上（按内容核对，不看谁下载的）。
    为什么单独说：下载目录往往同时是用户的归档目录，同名文件很可能属于旧版本 ——
    不声不响地拿它去装，会出现「sha256 与 Release 不一致」这种把正常状态说成被篡改的报错。 */
 function localUnknownRow(app) {
@@ -595,10 +595,15 @@ async function doAll(action) {
   const names = apps.map((a) => a.display || a.appname).join('、');
   const what = action === 'update' ? '更新' : '下载';
   if (!apps.length) { toast('没有可' + what + '的应用', 'err'); return; }
-  if (!confirm('对 ' + apps.length + ' 个应用执行「全部' + what + '」？\n\n' + names
-    + '\n\n' + (action === 'update'
+  const okAll = await askDialog({
+    title: '对 ' + apps.length + ' 个应用执行「全部' + what + '」',
+    rows: apps.map((a) => [[a.display || a.appname, a.update_available ? (a.installed + ' → ' + a.latest) : '']]),
+    notes: [action === 'update'
       ? '会依次下载并升级，每装一个该应用会短暂重启。队列一次跑一个。'
-      : '只下载安装包到本地，不改动任何应用。'))) return;
+      : '只下载安装包到本地，不改动任何应用。'],
+    okText: '全部' + what,
+  });
+  if (!okAll) return;
   try {
     const r = await api('/api/all', { method: 'POST', body: { action } });
     const okN = (r.queued || []).length;
@@ -629,16 +634,23 @@ async function doClean() {
   const lines = items.slice(0, 8).map((i) => '· ' + i.name + '（' + fmtSize(i.size) + '）');
   const more = items.length > 8 ? ('\n… 以及另外 ' + (items.length - 8) + ' 个') : '';
   const where = items[0].path.replace(/\/[^/]*$/, '');
-  const what = items.length
-    ? ('清理 ' + items.length + ' 个安装包，共 ' + fmtSize(r.size) + '？')
-    : ('清理 ' + parts + ' 个下载残留，共 ' + fmtSize(r.parts_size) + '？');
-  if (!confirm(what + '\n\n'
-    + (items.length ? (lines.join('\n') + more) : ('· ' + (r.parts || []).slice(0, 8).join('\n· ')))
-    + '\n\n位置：' + where
-    + (fgn ? ('\n\n同目录里另有 ' + fgn + ' 个不是本应用下载的安装包（'
-      + fmtSize(r.foreign_size) + '），不会动。') : '')
-    + '\n\n只删本应用自己下载过的包；已装好的应用不受影响。'
-    + '删掉的包以后要用可以再从 GitHub Release 下载。')) return;
+  const okClean = await askDialog({
+    title: items.length
+      ? ('清理 ' + items.length + ' 个安装包')
+      : ('清理 ' + parts + ' 个下载残留'),
+    rows: [items.map((i) => [i.name, fmtSize(i.size)])
+      .concat((r.parts || []).slice(0, 8).map((n) => [n, '下载残留']))],
+    notes: [
+      '位置：' + where,
+      fgn ? ('同目录里另有 ' + fgn + ' 个不是本应用下载的安装包（'
+        + fmtSize(r.foreign_size) + '），不会动。') : '',
+      '只删本应用自己下载过的包；已装好的应用不受影响。',
+      '删掉的包以后要用可以再从 GitHub Release 下载。',
+    ].filter(Boolean),
+    okText: '清理',
+    danger: true,
+  });
+  if (!okClean) return;
   try {
     const d = await api('/api/clean', { method: 'POST', body: {} });
     const n = (d.deleted || []).length;
@@ -751,7 +763,11 @@ function renderAppsList(list) {
     rm.textContent = '移除';
     rm.addEventListener('click', async () => {
       const who = it.display || it.appname || it.repo || it.url;
-      if (!confirm('不再管理「' + who + '」？\n\n只会把它从列表里去掉，不会卸载应用、也不会删任何文件。')) return;
+      if (!(await askDialog({
+        title: '不再管理「' + who + '」',
+        notes: ['只会把它从列表里去掉，不会卸载应用、也不会删任何文件。'],
+        okText: '移除',
+      }))) return;
       try {
         await api('/api/apps/remove', { method: 'POST', body: { source: it.repo || it.url, appname: it.appname } });
         toast('已移除 ' + who, 'ok');
@@ -832,22 +848,100 @@ const ENDPOINT = {
   update: '/api/update',
 };
 
+/* 应用内确认弹窗 —— 替代浏览器原生 confirm。
+   为什么自己做：原生弹窗是浏览器样式（方角、系统字体、不跟随应用深浅色），
+   嵌在飞牛应用小窗里跟应用不是一套东西。
+   返回 Promise<boolean>：确定 true、取消/Esc/点遮罩 false。 */
+function askDialog(opt) {
+  const o = opt || {};
+  return new Promise((resolve) => {
+    const modal = $('confirm-modal');
+    $('cf-title').textContent = o.title || '确认';
+    const body = $('cf-body');
+    body.textContent = '';
+    (o.lines || []).forEach((t) => {
+      const d = document.createElement('div');
+      if (t === '') { d.className = 'cf-gap'; body.appendChild(d); return; }
+      d.textContent = String(t);       // 一律纯文本：不用 innerHTML，避免注入
+      body.appendChild(d);
+    });
+    (o.rows || []).forEach((r) => {
+      const li = document.createElement('div');
+      li.className = 'cf-list';
+      r.forEach((pair) => {
+        const line = document.createElement('div');
+        line.className = 'cf-li cf-mono';
+        const a = document.createElement('span'); a.textContent = String(pair[0]);
+        const b = document.createElement('span'); b.textContent = String(pair[1]);
+        line.appendChild(a); line.appendChild(b);
+        li.appendChild(line);
+      });
+      body.appendChild(li);
+    });
+    (o.notes || []).forEach((t) => {
+      const d = document.createElement('div');
+      d.className = 'cf-dim';
+      d.textContent = String(t);
+      body.appendChild(d);
+    });
+    const ok = $('cf-ok');
+    ok.textContent = o.okText || '确定';
+    ok.classList.toggle('danger', !!o.danger);
+    ok.classList.toggle('primary', !o.danger);
+    $('cf-cancel').textContent = o.cancelText || '取消';
+    modal.classList.remove('hidden');
+    if (ok.focus) ok.focus();
+
+    const onOk = () => done(true);
+    const onNo = () => done(false);
+    const onBg = (ev) => { if (ev.target === modal) done(false); };
+    const onKey = (ev) => {
+      if (ev.key === 'Escape') done(false);
+      else if (ev.key === 'Enter' && document.activeElement !== $('cf-cancel')) done(true);
+    };
+    function done(v) {
+      modal.classList.add('hidden');
+      ok.removeEventListener('click', onOk);
+      $('cf-cancel').removeEventListener('click', onNo);
+      modal.removeEventListener('click', onBg);
+      document.removeEventListener('keydown', onKey);
+      resolve(v);
+    }
+    ok.addEventListener('click', onOk);
+    $('cf-cancel').addEventListener('click', onNo);
+    modal.addEventListener('click', onBg);
+    document.addEventListener('keydown', onKey);
+  });
+}
+
+/* 三个动作的确认内容。改回对象形式，好让弹窗按「标题 / 正文 / 按钮」排布，
+   而不是把一整段文字塞进原生 confirm 的纯文本里。 */
 const CONFIRM = {
-  download: (a) => '下载「' + (a.display || a.appname) + '」的安装包？\n\n'
-    + '版本 ' + a.latest + '（' + fmtSize(a.size) + '）\n'
-    + '只下载到本地并校验 sha256，不会改动应用。',
+  download: (a) => ({
+    title: '下载「' + (a.display || a.appname) + '」的安装包',
+    rows: [[['版本', a.latest + '（' + fmtSize(a.size) + '）']]],
+    notes: ['只下载到本地并校验 sha256，不会改动应用。'],
+    okText: '下载',
+  }),
   // downloaded 可能已被清理/目录换过而缺失：这里必须兜底，否则「重试」一点就抛
   // TypeError（点击处理器里没有 try/catch）→ 按钮毫无反应、也没有任何提示。
-  install: (a) => '用已下载的安装包安装「' + (a.display || a.appname) + '」？\n\n'
-    + a.installed + ' → ' + ((a.downloaded && a.downloaded.version) || a.latest || '?') + '\n'
-    + '安装过程中该应用会短暂重启，数据不会丢失。',
-  update: (a) => '下载并更新「' + (a.display || a.appname) + '」？\n\n'
-    + a.installed + ' → ' + a.latest + '\n'
-    + '先下载并校验 sha256，然后升级。过程中该应用会短暂重启，数据不会丢失。',
+  install: (a) => ({
+    title: '用已下载的安装包安装「' + (a.display || a.appname) + '」',
+    rows: [[['版本', a.installed + ' → '
+      + ((a.downloaded && a.downloaded.version) || a.latest || '?')]]],
+    notes: ['安装过程中该应用会短暂重启，数据不会丢失。'],
+    okText: '安装',
+  }),
+  update: (a) => ({
+    title: '下载并更新「' + (a.display || a.appname) + '」',
+    rows: [[['版本', a.installed + ' → ' + a.latest]]],
+    notes: ['先下载并校验 sha256，然后升级。过程中该应用会短暂重启，数据不会丢失。'],
+    okText: '下载并更新',
+  }),
 };
 
 async function doAction(app, action, label) {
-  if (!confirm(CONFIRM[action](app))) return;
+  if (!(await askDialog(CONFIRM[action](app)))) return;
   try {
     const r = await api(ENDPOINT[action], { method: 'POST', body: { appname: app.appname } });
     toast('已加入后台队列（' + label + '），可以关掉页面');
@@ -866,8 +960,16 @@ function startPoll() {
       await refresh();
       const live = activeTasks();
       const ck = (state && state.checking) || {};
-      // 有活儿或正在检查 → 1s；空闲 → 10s
-      const want = (live.length || ck.running) ? 1000 : 10000;
+      // 刚结束的动作要尽快反映到卡片上：结果条是一有任务结果就画的，而卡片主体等下一次轮询 ——
+      // 空闲时轮询是 10 秒一次，于是会出现「上面写着更新完成、下面还显示有新版本」的自相矛盾
+      // （实测用户截图就是这个：更新完成 7 秒后卡片还没翻）。所以结束后的 20 秒内保持 1 秒轮询。
+      const justDone = ((state && state.tasks) || []).some((t) => {
+        if (!t.finished_at) return false;
+        const ts = Date.parse(t.finished_at);
+        return !isNaN(ts) && (Date.now() - ts) < 20000;
+      });
+      // 有活儿、正在检查、或刚做完 → 1s；空闲 → 10s
+      const want = (live.length || ck.running || justDone) ? 1000 : 10000;
       if (pollTimer && pollTimer.ms !== want) {
         clearInterval(pollTimer.id);
         pollTimer = { ms: want, id: setInterval(tick, want) };
@@ -910,8 +1012,11 @@ $('log-btn').addEventListener('click', showLog);
 
 $('token-save').addEventListener('click', async () => {
   const val = $('token-input').value.trim();
-  if (val && !confirm('保存这个 GitHub 访问令牌吗？\n\n它只写入本机数据目录（权限 600），'
-    + '不会随应用包分发，页面上也只回显末四位。')) return;
+  if (val && !(await askDialog({
+    title: '保存这个 GitHub 访问令牌',
+    notes: ['它只写入本机数据目录（权限 600），不会随应用包分发，页面上也只回显末四位。'],
+    okText: '保存',
+  }))) return;
   try {
     const r = await api('/api/token', { method: 'POST', body: { token: val } });
     $('token-input').value = '';
@@ -1233,7 +1338,11 @@ $('app-add-input').addEventListener('keydown', (ev) => {
 });
 
 $('apps-reset').addEventListener('click', async () => {
-  if (!confirm('把列表恢复成内置默认（三个自建应用）？\n\n只会改列表，不会卸载应用、也不会删文件。')) return;
+  if (!(await askDialog({
+    title: '把列表恢复成内置默认',
+    notes: ['会替换掉现在这份被管理应用列表（三个自建应用），不会卸载应用、也不会删文件。'],
+    okText: '恢复默认',
+  }))) return;
   try {
     await api('/api/apps/reset', { method: 'POST' });
     toast('已恢复默认列表', 'ok');

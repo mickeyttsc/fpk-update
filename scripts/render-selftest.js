@@ -18,6 +18,13 @@ function makeEl(tag) {
       toggle(c, on) { if (on === undefined) { this._s.has(c) ? this._s.delete(c) : this._s.add(c); } else if (on) this._s.add(c); else this._s.delete(c); },
       contains(c) { return this._s.has(c); },
     },
+    _ev: {},
+    addEventListener(type, fn) { (this._ev[type] = this._ev[type] || []).push(fn); },
+    removeEventListener(type, fn) {
+      const a = this._ev[type] || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1);
+    },
+    _fire(type, ev) { (this._ev[type] || []).slice().forEach((fn) => fn(ev || {})); },
+    focus() { document.activeElement = this; },
     appendChild(c) { this.children.push(c); if (c) c.parentNode = this; return c; },
     insertBefore(c, ref) {
       const i = ref ? this.children.indexOf(ref) : -1;
@@ -25,13 +32,13 @@ function makeEl(tag) {
       if (c) c.parentNode = this;
       return c;
     },
+    remove() { if (this.parentNode && this.parentNode.removeChild) this.parentNode.removeChild(this); },
     removeChild(c) {
       const i = this.children.indexOf(c);
       if (i >= 0) this.children.splice(i, 1);
       if (c) c.parentNode = null;
       return c;
     },
-    addEventListener() {},
     setAttribute(k, v) { this._attrs[k] = String(v); },
     getAttribute(k) { return this._attrs[k] === undefined ? null : this._attrs[k]; },
   };
@@ -64,7 +71,13 @@ const document = {
     if (htmlIds.length && !idSet.has(id)) return null;
     return _els[id] || (_els[id] = makeEl('div'));
   },
-  addEventListener() {},
+  _ev: {},
+  addEventListener(type, fn) { (this._ev[type] = this._ev[type] || []).push(fn); },
+  removeEventListener(type, fn) {
+    const a = this._ev[type] || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1);
+  },
+  _fire(type, ev) { (this._ev[type] || []).slice().forEach((fn) => fn(ev || {})); },
+  activeElement: null,
   querySelector: () => makeEl('div'),
   querySelectorAll: () => [],
   documentElement: makeEl('html'),
@@ -102,7 +115,8 @@ const src = fs.readFileSync(path, 'utf8')
   + '\n;globalThis.__sortApps = sortApps;'
   + '\n;globalThis.__getTheme = () => themePref;'
   + '\n;globalThis.__render = render;'
-  + '\n;globalThis.__els = (id) => document.getElementById(id);';
+  + '\n;globalThis.__els = (id) => document.getElementById(id);'
+  + '\n;globalThis.__askDialog = askDialog;';
 
 vm.createContext(sandbox);
 vm.runInContext(src, sandbox, { filename: path });
@@ -580,6 +594,61 @@ try {
   bad++;
 }
 
-console.log('────────────────────────────────────────');
-console.log(bad === 0 ? '✅ 渲染自测通过（无异常、无重复）' : `✘ 有 ${bad} 处问题`);
-process.exit(bad === 0 ? 0 : 1);
+/* 应用内确认弹窗：真开一遍、真点一遍，断言 Promise 的取值 */
+(async () => {
+  console.log('────────────────────────────────────────');
+  console.log('▸ 应用内确认弹窗（替掉浏览器原生 confirm）');
+  try {
+    const p1 = sandbox.__askDialog({
+      title: '下载「柠檬音乐」的安装包',
+      rows: [[['版本', '1.2.17.7 → 1.2.17.8']]],
+      notes: ['只下载到本地并校验 sha256，不会改动应用。'],
+      okText: '下载',
+    });
+    const okBtn = sandbox.__els('cf-ok');
+    const shown = !sandbox.__els('confirm-modal').classList.contains('hidden');
+    const title = sandbox.__els('cf-title').textContent;
+    const parts = [];
+    (function walk(e) {
+      if (e.textContent) parts.push(String(e.textContent));
+      (e.children || []).forEach(walk);
+    })(sandbox.__els('cf-body'));
+    const bodyTxt = parts.join(' | ');
+    const okRender = shown && title.includes('柠檬音乐') && okBtn.textContent === '下载'
+      && bodyTxt.includes('1.2.17.7 → 1.2.17.8') && bodyTxt.includes('sha256');
+    console.log(`  ${okRender ? '✔' : '✘'} 按传入内容渲染（标题/版本行/说明/按钮文案）`);
+    if (!okRender) bad++;
+    okBtn._fire('click');
+    const yes = await p1;
+    const closed = sandbox.__els('confirm-modal').classList.contains('hidden');
+    console.log(`  ${yes === true && closed ? '✔' : '✘'} 点「确定」→ resolve(true) 且弹窗关闭`);
+    if (!(yes === true && closed)) bad++;
+
+    const p2 = sandbox.__askDialog({ title: '清理安装包', danger: true, okText: '清理' });
+    const danger = sandbox.__els('cf-ok').classList.contains('danger');
+    console.log(`  ${danger ? '✔' : '✘'} 会删文件的动作用醒目按钮（danger）`);
+    if (!danger) bad++;
+    sandbox.__els('cf-cancel')._fire('click');
+    const no = await p2;
+    console.log(`  ${no === false ? '✔' : '✘'} 点「取消」→ resolve(false)`);
+    if (no !== false) bad++;
+
+    const p3 = sandbox.__askDialog({ title: 'X' });
+    sandbox.document._fire('keydown', { key: 'Escape' });
+    const esc = await p3;
+    console.log(`  ${esc === false ? '✔' : '✘'} 按 Esc → 取消`);
+    if (esc !== false) bad++;
+
+    const p4 = sandbox.__askDialog({ title: 'Y' });
+    sandbox.__els('confirm-modal')._fire('click', { target: sandbox.__els('confirm-modal') });
+    const bg = await p4;
+    console.log(`  ${bg === false ? '✔' : '✘'} 点弹窗外遮罩 → 取消`);
+    if (bg !== false) bad++;
+  } catch (e) {
+    console.log('  ✘ 抛异常 -> ' + e.message);
+    bad++;
+  }
+  console.log('────────────────────────────────────────');
+  console.log(bad === 0 ? '✅ 渲染自测通过（无异常、无重复）' : `✘ 有 ${bad} 处问题`);
+  process.exit(bad === 0 ? 0 : 1);
+})();

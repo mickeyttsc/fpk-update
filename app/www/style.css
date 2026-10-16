@@ -462,7 +462,8 @@ code {
 
   /* 设置弹窗：手机上进全屏，别挤在一个小卡片里 */
   .modal { padding: 0; align-items: stretch; }
-  .modal-card, .modal-card.wide {
+  /* 只有设置那种大面板才全屏；确认弹窗在手机上仍是居中对话框 */
+  .modal-card:not(.cf), .modal-card.wide:not(.cf) {
     max-width: none; width: 100%; border-radius: 0; border: none;
     min-height: 100vh; max-height: 100vh; overflow-y: auto;
     padding: 16px 14px calc(24px + env(safe-area-inset-bottom));
@@ -493,3 +494,28 @@ code {
   background: var(--bg-soft); opacity: .8; font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+
+/* ── 应用内确认弹窗 ── */
+.modal-card.cf {
+  max-width: 420px; padding: 18px 18px 14px;
+  width: calc(100% - 36px); min-height: 0; max-height: 82vh; overflow-y: auto;
+}
+.modal-card.cf h3 { margin: 0 0 10px; font-size: 16px; line-height: 1.4; }
+.cf-body { font-size: 13.5px; line-height: 1.75; color: var(--fg); }
+.cf-body .cf-gap { height: 9px; }
+.cf-body .cf-dim { color: var(--fg-muted); }
+.cf-body .cf-mono { font-variant-numeric: tabular-nums; }
+.cf-body .cf-list {
+  margin: 6px 0 0; padding: 8px 10px; border-radius: 10px;
+  background: var(--bg); border: 1px solid var(--line-soft);
+  max-height: 172px; overflow-y: auto;
+}
+.cf-body .cf-li { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+.cf-body .cf-li > span:last-child { color: var(--fg-muted); flex: none; }
+.cf-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+@media (max-width: 700px) {
+  .cf-actions .btn { flex: 1; }        /* 手机上按钮等分，好点 */
+}
+/* 真会删文件的动作用醒目色，别让人误点 */
+.btn.danger { background: linear-gradient(135deg, #f97316, #e5484d); color: #fff; }
+.btn.danger:hover:not(:disabled) { filter: brightness(1.06); }
