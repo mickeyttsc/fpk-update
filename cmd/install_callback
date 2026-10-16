@@ -1,0 +1,69 @@
+#!/bin/bash
+# 安装后：把安装向导里设置的访问密码落盘（留空则用默认 password）
+#
+# 为什么放在这里而不是 cmd/main：
+#   向导填的值由 fnOS 以环境变量 wizard_<field> 注入【生命周期脚本】，
+#   start 阶段（由应用中心守护进程拉起）不一定继承得到，所以在
+#   install_callback 这个"向导刚填完"的时刻落盘最可靠。
+set -u
+
+_resolve() {
+    local appname="${TRIM_APPNAME:-fpk-update}" vol="" v appdir=""
+    appdir="$(readlink -f "/var/apps/${appname}/target" 2>/dev/null || true)"
+    case "$appdir" in /vol[0-9]*/@appcenter/*) vol="$(printf '%s' "$appdir" | cut -d/ -f2)" ;; esac
+    if [ -z "$vol" ]; then
+        for v in /vol[0-9]*; do
+            [ -d "${v}/@appcenter/${appname}" ] && vol="${v#/}" && break
+        done
+    fi
+    [ -z "$vol" ] && vol="vol2"
+    : "${TRIM_PKGHOME:=/${vol}/@apphome/${appname}}"
+    : "${TRIM_PKGVAR:=/${vol}/@appdata/${appname}}"
+}
+_resolve
+
+mkdir -p "$TRIM_PKGHOME" "$TRIM_PKGVAR/downloads" 2>/dev/null
+
+# GitHub 访问令牌（可选）：向导填了才落盘。只写本机数据目录，权限 600。
+# 不填也能用，但匿名额度只有 60 次/小时且按出口 IP 共享，检测容易被限流打断。
+if [ -n "${wizard_github_token:-}" ]; then
+    printf '%s\n' "$wizard_github_token" > "${TRIM_PKGVAR}/github-token.txt"
+    chmod 600 "${TRIM_PKGVAR}/github-token.txt" 2>/dev/null
+fi
+
+# 数据目录里留一份人类可读的说明（用户从应用中心"数据目录"进去能看到）
+cat > "${TRIM_PKGVAR}/README-说明.txt" 2>/dev/null <<'TXT'
+FPK更新 · 数据目录说明
+========================
+
+apps.json
+    被管理的应用（白名单）—— 只有这个文件里列出的应用会被显示和操作。
+    想加/减应用就编辑它（改完刷新网页即可，不用重启）。
+
+settings.json
+    网页「设置」里改过的项（目前是安装包下载目录）。
+
+github-token.txt
+    GitHub 访问令牌（可选）。不填也能用，但匿名额度只有 60 次/小时且按出口 IP
+    共享，很容易被限流；填了可提到 5000 次/小时。可在网页「设置」里随时修改。
+
+downloads/
+    默认的安装包下载目录（网页「设置」里可以改成别处）。
+    升级失败时这里会保留一份，可用于回滚。
+
+fpk-update.log
+    运行与操作日志（网页「设置 → 查看日志」里也能看）。
+
+使用说明
+--------
+每个应用有三个动作：
+  · 下载        —— 只把安装包下到本地并校验 sha256，不改动应用
+  · 安装        —— 用已经下载好的安装包安装（不重新下载）
+  · 下载并更新  —— 下载 + 校验 + 立即升级
+
+升级走的是飞牛应用中心官方的升级通道（与你在应用中心点「更新」完全相同）：
+保数据、不重装。过程中被更新的应用会短暂重启。
+本应用不会自动升级任何东西 —— 每次都要你自己点。
+TXT
+
+exit 0

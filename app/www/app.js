@@ -1,0 +1,1136 @@
+/* FPK更新 · 前端（原生 JS，无依赖） */
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+let state = null;
+let pollTimer = null;
+
+/* 内置默认图标（应用没有自带图标 / 图标读不到时用） */
+const DEFAULT_ICON = '/default-icon.svg';
+
+/* 添加/换版本 选择器的状态 */
+const picker = { options: null, source: '', editing: false };
+
+/* ── 主题 ──
+   三级来源：服务器设置（权威） > localStorage 缓存（避免首屏闪白） > 跟随系统。
+   JS 会把"生效值"写到 <html data-theme="light|dark">，CSS 两处都认：
+   一处给系统跟随（@media，防无 JS 时闪），一处给手动强制（[data-theme]）。 */
+const THEME_KEY = 'fpku-theme';
+const mqDark = (typeof window !== 'undefined' && window.matchMedia)
+  ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+
+function applyTheme(pref) {
+  const p = (pref === 'light' || pref === 'dark') ? pref : 'auto';
+  const eff = (p === 'auto') ? ((mqDark && mqDark.matches) ? 'dark' : 'light') : p;
+  document.documentElement.setAttribute('data-theme', eff);
+  const meta = document.querySelector('meta[name="color-scheme"]');
+  if (meta) meta.setAttribute('content', eff);
+  document.querySelectorAll('#theme-seg button').forEach((b) => {
+    b.classList.toggle('on', b.getAttribute('data-v') === p);
+  });
+  try { localStorage.setItem(THEME_KEY, p); } catch (e) { /* 隐私模式忽略 */ }
+  return p;
+}
+
+/* 首屏：先用缓存（或跟随系统）套上，别等接口回来才变色 */
+let themePref = 'auto';
+try { themePref = localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) { themePref = 'auto'; }
+applyTheme(themePref);
+
+/* 跟随系统时，系统切换要跟着动 */
+if (mqDark && mqDark.addEventListener) {
+  mqDark.addEventListener('change', () => {
+    if (themePref === 'auto') applyTheme('auto');
+  });
+}
+
+/* 任务结果在卡片上保留多久（超过就不显示了，避免陈旧报错一直挂在那里） */
+const JOB_TTL_MS = 30 * 60 * 1000;
+
+/* ── 请求封装：POST 必须带自定义头（后端据此挡跨站请求） ── */
+async function api(path, opts = {}) {
+  const init = { method: opts.method || 'GET', credentials: 'same-origin', headers: {} };
+  if (init.method === 'POST') {
+    init.headers['X-Requested-With'] = 'fpk-update';
+    init.headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(opts.body || {});
+  }
+  const res = await fetch(path, init);
+  let data = null;
+  try { data = await res.json(); } catch (e) { data = null; }
+  if (!res.ok) {
+    const msg = (data && data.error) || ('请求失败（HTTP ' + res.status + '）');
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+/* ── Toast ── */
+function toast(msg, kind = '') {
+  const el = document.createElement('div');
+  el.className = 'toast ' + kind;
+  el.textContent = msg;
+  $('toasts').appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; }, 3800);
+  setTimeout(() => el.remove(), 4200);
+}
+
+function showNotice(msg, kind = 'info') {
+  const el = $('notice');
+  if (!msg) { el.classList.add('hidden'); return; }
+  el.textContent = msg;
+  el.className = 'notice ' + kind;
+}
+
+/* ── 格式化 ── */
+function fmtTime(iso) {
+  if (!iso) return '尚未检查';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const diff = Math.floor((Date.now() - d.getTime()) / 1000);
+  let rel;
+  if (diff < 0) rel = '刚刚';
+  else if (diff < 60) rel = '刚刚';
+  else if (diff < 3600) rel = Math.floor(diff / 60) + ' 分钟前';
+  else if (diff < 86400) rel = Math.floor(diff / 3600) + ' 小时前';
+  else rel = Math.floor(diff / 86400) + ' 天前';
+  const p = (n) => String(n).padStart(2, '0');
+  return rel + ' · ' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' '
+    + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+function fmtSize(n) {
+  if (n === null || n === undefined) return '';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0, v = Number(n);
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (i === 0 ? v : v.toFixed(1)) + ' ' + u[i];
+}
+
+function normVer(v) { return String(v || '').replace(/^[vV]/, ''); }
+
+/* 任务是否还值得显示（未结束，或结束不到 TTL） */
+function taskFresh(t) {
+  if (!t || !t.status) return false;
+  if (t.status === 'running' || t.status === 'queued') return true;
+  if (!t.finished_at) return false;
+  const ts = new Date(t.finished_at).getTime();
+  return !isNaN(ts) && (Date.now() - ts) < JOB_TTL_MS;
+}
+
+/* 某个应用当前/最近的任务：优先进行中/排队的，其次最近的已完成 */
+function taskFor(appname) {
+  const list = (state && state.tasks) || [];
+  const live = list.filter((t) => t.appname === appname
+    && (t.status === 'running' || t.status === 'queued'));
+  if (live.length) return live[live.length - 1];
+  const done = list.filter((t) => t.appname === appname && taskFresh(t));
+  return done.length ? done[done.length - 1] : null;
+}
+
+/* 队列里是否有活儿（决定轮询频率与按钮禁用） */
+function activeTasks() {
+  return ((state && state.tasks) || []).filter(
+    (t) => t.status === 'running' || t.status === 'queued');
+}
+
+function anyActive() {
+  return activeTasks().length > 0;
+}
+
+/* 排序：正在动的 → 有新版本的 → 检查失败的 → 正常的；同级按名字 */
+function sortApps(list) {
+  const rank = (a) => {
+    const t = taskFor(a.appname);
+    if (t && (t.status === 'running' || t.status === 'queued')) return 0;
+    if (a.update_available) return 1;
+    if (a.error && !a.latest) return 3;
+    return 2;
+  };
+  return list.slice().sort((a, b) => {
+    const r = rank(a) - rank(b);
+    if (r) return r;
+    return String(a.display || a.appname || '')
+      .localeCompare(String(b.display || b.appname || ''), 'zh');
+  });
+}
+
+/* ── 小组件 ── */
+function badge(text, kind) {
+  const b = document.createElement('span');
+  b.className = 'badge ' + kind;
+  b.textContent = text;
+  return b;
+}
+
+function chip(text, cls) {
+  const s = document.createElement('span');
+  s.className = 'ver' + (cls ? ' ' + cls : '');
+  s.textContent = text;
+  return s;
+}
+
+function btn(label, cls, onClick, title) {
+  const b = document.createElement('button');
+  b.className = 'btn ' + cls;
+  b.textContent = label;
+  if (title) b.title = title;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+/* ── 卡片 ── */
+/* ── 卡片渲染 ──
+   设计原则：**一件事只说一遍**。
+   之前的毛病是同一个事实出现三次（绿色"已下载"提示 + 100% 进度条 + "✓ 已下载 …fpk"），
+   加上"已装 X → 最新 X"两个**相同**的版本号还配个箭头，看着就乱。现在的规则：
+     · 版本行：相同时只写一次；不同才出现 → 与「最新」
+     · 状态行：同一时刻只渲染一条 —— 正在跑=进度；刚结束=结果条（可关闭）；
+       其余=静态状态（只在"本地有包"这类需要你知道的时候出现）
+     · 按钮统一在底部一行，等宽
+*/
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined && text !== null) n.textContent = text;
+  return n;
+}
+
+function iconBox(app) {
+  const box = el('div', 'c-icon');
+  const img = el('img');
+  img.alt = app.display || app.appname;
+  img.loading = 'lazy';
+  img.addEventListener('error', () => {
+    if (!img.dataset.fallback) {
+      img.dataset.fallback = '1';
+      img.src = DEFAULT_ICON;
+    }
+  });
+  img.src = app.has_icon
+    ? ('/api/icon/' + encodeURIComponent(app.appname) + '?v=' + encodeURIComponent(app.installed || ''))
+    : DEFAULT_ICON;
+  box.appendChild(img);
+  return box;
+}
+
+/* 右上角状态徽章：一个卡片只挂一个 */
+function statusBadge(app, task, running) {
+  if (running) {
+    return badge(actionLabel(task.action) + (task.status === 'queued' ? '排队中' : '中'), 'new');
+  }
+  if (app.error && !app.latest) return badge('检查失败', 'err');
+  if (app.update_available) return badge('有新版本', 'new');
+  // 有更新的版本、但不能自动更新（典型原因：该来源没有 sha256 摘要）。
+  // 早先这种情况会掉到下面的「已是最新」——那是**误导**：明明有新版。
+  if (app.relation === 'newer') return badge('有新版 · 不能自动更新', 'warn');
+  if (app.relation === 'older') return badge('已钉旧版', 'wait');
+  if (app.latest) return badge('已是最新', 'ok');
+  return badge('未知', 'wait');
+}
+
+/* 版本行：相同时只显示一次，不同才画箭头 */
+function versionRow(app) {
+  const box = el('div', 'c-vers');
+  const same = app.latest && normVer(app.latest) === normVer(app.installed);
+
+  const c1 = el('div', 'c-cell');
+  c1.appendChild(el('span', 'c-label', '已装'));
+  c1.appendChild(el('span', 'c-val', app.installed || '—'));
+  box.appendChild(c1);
+
+  if (app.latest && !same) {
+    box.appendChild(el('span', 'c-arrow', '→'));
+    const c2 = el('div', 'c-cell');
+    c2.appendChild(el('span', 'c-label', '最新'));
+    c2.appendChild(el('span', 'c-val new', app.latest));
+    box.appendChild(c2);
+  }
+
+  const meta = [];
+  if (app.size) meta.push(fmtSize(app.size));
+  if (app.published_at) meta.push(fmtTime(app.published_at).replace(/（.*/, '') + ' 发布');
+  if (meta.length) box.appendChild(el('span', 'c-meta', meta.join(' · ')));
+  return box;
+}
+
+/* 静态状态行：只在"本地有包"这类需要你知道的时候出现，且只有一条 */
+function staticState(app) {
+  const d = app.downloaded;
+  if (!d) return null;
+  const differs = normVer(d.version) !== normVer(app.installed);
+  let cls = 'ok';
+  let text;
+  if (!d.complete) {
+    cls = 'warn';
+    text = '本地安装包不完整（' + fmtSize(d.size) + '），建议重新下载';
+  } else if (differs) {
+    text = '安装包已在本地：' + d.version + '（' + fmtSize(d.size) + '），可直接安装';
+  } else {
+    cls = 'muted';
+    text = '安装包已在本地（' + fmtSize(d.size) + '）';
+  }
+  const row = el('div', 'c-state ' + cls);
+  row.appendChild(el('span', 'c-state-ico', cls === 'warn' ? '!' : (cls === 'ok' ? '↓' : '·')));
+  row.appendChild(el('span', '', text));
+  return row;
+}
+
+function renderCard(app) {
+  const task = taskFor(app.appname);
+  const running = !!(task && (task.status === 'running' || task.status === 'queued'));
+  const finished = !!(task && !running);
+  // 只禁用**这个应用自己**的按钮。原来是"有任何一个任务在跑就禁用所有卡片"，
+  // 那等于让队列形同虚设 —— 想给三个应用排队下载都做不到。队列本来就是为这个做的。
+  const busy = running;
+
+  const card = el('div', 'card');
+  if (app.update_available) card.classList.add('has-update');
+
+  /* 头部 */
+  const head = el('div', 'c-head');
+  head.appendChild(iconBox(app));
+  const ident = el('div', 'c-ident');
+  const nameRow = el('div', 'c-name');
+  nameRow.appendChild(el('strong', '', app.display || app.appname));
+  if (app.appname && app.appname !== (app.display || '')) {
+    nameRow.appendChild(el('span', 'appname', app.appname));
+  }
+  ident.appendChild(nameRow);
+  ident.appendChild(el('div', 'c-src', app.repo || app.url || ''));
+  head.appendChild(ident);
+  head.appendChild(statusBadge(app, task, running));
+  card.appendChild(head);
+
+  /* 版本 */
+  card.appendChild(versionRow(app));
+
+  /* 更新说明（对标应用商店：让人看到"这版改了什么"）。GitHub Release 正文，可展开。 */
+  if (app.notes) {
+    const d = el('details', 'c-notes');
+    d.appendChild(el('summary', '', '更新说明'));
+    d.appendChild(el('div', 'c-notes-body', app.notes));
+    card.appendChild(d);
+  }
+
+  /* 状态：进度 / 结果 / 静态，三选一 */
+  if (running) {
+    card.appendChild(progressBlock(task, 'run'));
+  } else if (finished) {
+    card.appendChild(resultStrip(task, app));
+  } else {
+    const st = staticState(app);
+    if (st) card.appendChild(st);
+  }
+
+  if (app.error) card.appendChild(el('div', 'c-err', app.error));
+
+  /* 按钮行 */
+  const actions = el('div', 'c-actions');
+  const canDownload = !!app.latest && !busy;
+  const canInstall = !!(app.downloaded && app.downloaded.complete && !busy
+    && normVer(app.downloaded.version) !== normVer(app.installed));
+  const canUpdate = !!app.update_available && !busy;
+
+  const bDl = btn('下载', 'ghost sm', () => doAction(app, 'download', '下载'),
+    app.latest ? ('把 ' + app.latest + ' 的安装包下到本地（不改动应用）') : '暂无可用版本');
+  const bIn = btn('安装', 'ghost sm', () => doAction(app, 'install', '安装'),
+    canInstall ? ('用已下载的 ' + app.downloaded.version + ' 安装（不重新下载）') : '需要先下载安装包');
+  const bUp = btn('下载并更新', 'primary sm', () => doAction(app, 'update', '下载并更新'),
+    canUpdate ? '下载最新版并立即升级' : '当前没有可更新的版本');
+  bDl.disabled = !canDownload;
+  bIn.disabled = !canInstall;
+  bUp.disabled = !canUpdate;
+  actions.appendChild(bDl);
+  actions.appendChild(bIn);
+  actions.appendChild(bUp);
+  card.appendChild(actions);
+
+  return card;
+}
+
+function actionLabel(a) {
+  return { download: '下载', install: '安装', update: '更新' }[a] || '处理';
+}
+
+/* 进度块（只在任务进行中显示）：进度条 + 文字 + 百分比 */
+function progressBlock(task, mode) {
+  const p = el('div', 'c-progress');
+
+  const bar = el('div', 'bar');
+  const fill = el('i');
+  if (task && task.percent !== null && task.percent !== undefined) {
+    fill.style.width = Math.max(0, Math.min(100, task.percent)) + '%';
+  } else {
+    bar.classList.add('indet');
+  }
+  bar.appendChild(fill);
+  p.appendChild(bar);
+
+  const line = el('div', 'line');
+  line.appendChild(el('span', 'txt', (task && task.message) || '处理中…'));
+  if (task && task.percent !== null && task.percent !== undefined) {
+    line.appendChild(el('span', 'pct', task.percent + '%'));
+  }
+  p.appendChild(line);
+  return p;
+}
+
+/* 结果条（任务刚结束时显示一条，可关闭/可重试；没有进度条，避免与结果重复表达） */
+function resultStrip(task, app) {
+  const ok = task.status === 'ok';
+  const row = el('div', 'c-state ' + (ok ? 'ok' : 'bad'));
+  row.appendChild(el('span', 'c-state-ico', ok ? '✓' : '✕'));
+  row.appendChild(el('span', '', task.message || (ok ? '完成' : '失败')));
+  // 失败给个「重试」——手机应用商店都这么做，比让用户自己找按钮回来点强
+  if (!ok && app) {
+    const re = el('button', 'mini', '重试');
+    re.title = '按同样的操作再试一次';
+    re.addEventListener('click', () => doAction(app, task.action, actionLabel(task.action)));
+    row.appendChild(re);
+  }
+  const x = el('button', 'dismiss', '×');
+  x.title = '关闭这条提示';
+  x.addEventListener('click', async () => {
+    try { await api('/api/job/dismiss', { method: 'POST' }); } catch (e) { /* 忽略 */ }
+    await refresh();
+  });
+  row.appendChild(x);
+  return row;
+}
+/* ── 渲染 ── */
+/* 回填输入框：正在输入的框不动（否则会打断用户输入），其余一律同步服务端的值 */
+function syncInput(id, val) {
+  const el = $(id);
+  if (!el) return;
+  const active = document.activeElement;
+  if (active && active === el) return;
+  el.value = val;
+}
+
+function render() {
+  const s = state;
+  $('last-check').textContent = s.last_check ? ('上次检查 ' + fmtTime(s.last_check)) : '尚未检查';
+
+  const cards = $('cards');
+  cards.textContent = '';
+  const apps = s.apps || [];
+
+  if (!apps.length) {
+    const empty = document.createElement('div');
+    empty.className = 'card';
+    const b = document.createElement('div');
+    b.className = 'body';
+    const t = document.createElement('strong');
+    t.textContent = '被管理的应用是空的';
+    const p = document.createElement('div');
+    p.className = 'note';
+    p.textContent = '请编辑数据目录里的 apps.json，把要管理的应用加进去（文件内有格式说明），刷新本页即可。';
+    b.appendChild(t); b.appendChild(p); empty.appendChild(b);
+    cards.appendChild(empty);
+  } else {
+    // 排序（对标应用商店）：正在动的 → 有新版本的 → 正常的，同级按名字。
+    // 这样「需要你看的东西」永远在最上面，不用在一堆卡片里找。
+    sortApps(apps).forEach((a) => cards.appendChild(renderCard(a)));
+  }
+
+  /* 顶部汇总：有几个可更新 + 一键全部更新（对标手机应用商店） */
+  renderSummary(s);
+
+  /* 顶部：进行中的任务（含排队），后台跑，关掉页面也不影响 */
+  const live = activeTasks();
+  if (live.length) {
+    const cur = live.find((t) => t.status === 'running') || live[0];
+    const extra = live.length > 1 ? ('（队列还有 ' + (live.length - 1) + ' 个）') : '';
+    showNotice('后台任务：' + (cur.display || cur.appname) + ' · '
+      + actionLabel(cur.action) + ' · ' + (cur.message || '处理中…') + ' ' + extra
+      + '　—— 可以关掉本页面，任务会在后台继续。', 'info');
+  } else if (!s.has_token) {
+    showNotice('还没设置 GitHub 访问令牌：匿名额度只有 60 次/小时且按出口 IP 共享，'
+      + '「检查更新」容易被限流。点右上角「设置」填一个令牌就稳了。', 'info');
+  } else {
+    showNotice('');
+  }
+
+  /* 设置里的只读信息 */
+  $('wl-path').textContent = s.whitelist_file || '—';
+  $('auto-note').textContent = '每 ' + (s.check_interval_min || 60) + ' 分钟一次（只查版本，不会自动升级）';
+  renderAppsList(s.whitelist || []);
+  renderTaskList(s.tasks || []);
+  $('token-state').textContent = s.has_token ? ('当前：已设置 ' + (s.token_hint || '')) : '当前：未设置（走匿名额度）';
+  const st = s.settings || {};
+  const cur = st.download_dir || '—';
+  $('dl-state').textContent = '当前：' + cur
+    + (cur === s.default_download_dir ? '（默认）' : '');
+  syncInput('dl-input', cur);
+  syncInput('conc-input', String(st.concurrency || 4));
+  $('auto-dl-input').checked = !!st.auto_download;
+  $('auto-clean-input').checked = !!st.auto_clean;
+  const pk = s.packages || {};
+  const fg = pk.foreign_count || 0;
+  $('pkg-state').textContent = (pk.count
+    ? ('可清理：' + pk.count + ' 个 · ' + fmtSize(pk.size))
+    : '可清理：无（本应用下载的包，装完会自动清掉）')
+    + (fg ? ('　·　另有 ' + fg + ' 个不是本应用下载的（' + fmtSize(pk.foreign_size)
+      + '），不会动') : '');
+  // 主题以服务端设置为准（首屏用的是本地缓存）
+  if (st.theme && st.theme !== themePref) {
+    themePref = applyTheme(st.theme);
+  } else {
+    document.querySelectorAll('#theme-seg button').forEach((b) => {
+      b.classList.toggle('on', b.getAttribute('data-v') === themePref);
+    });
+  }
+  fillMirrorSelect(st.mirror || '', s.mirror_presets || []);
+}
+
+/* ── 顶部汇总条 + 全部更新 ── */
+function renderSummary(s) {
+  const box = $('summary');
+  const apps = s.apps || [];
+  const n = apps.filter((a) => a.update_available).length;
+  const errs = apps.filter((a) => a.error && !a.latest).length;
+  if (!n && !errs) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  const bits = [];
+  if (n) bits.push(n + ' 个应用有新版本');
+  if (errs) bits.push(errs + ' 个检查失败');
+  $('summary-txt').textContent = bits.join(' · ');
+  $('all-update').classList.toggle('hidden', !n);
+  $('all-download').classList.toggle('hidden', !n);
+}
+
+async function doAll(action) {
+  const apps = (state.apps || []).filter((a) => a.update_available);
+  const names = apps.map((a) => a.display || a.appname).join('、');
+  const what = action === 'update' ? '更新' : '下载';
+  if (!apps.length) { toast('没有可' + what + '的应用', 'err'); return; }
+  if (!confirm('对 ' + apps.length + ' 个应用执行「全部' + what + '」？\n\n' + names
+    + '\n\n' + (action === 'update'
+      ? '会依次下载并升级，每装一个该应用会短暂重启。队列一次跑一个。'
+      : '只下载安装包到本地，不改动任何应用。'))) return;
+  try {
+    const r = await api('/api/all', { method: 'POST', body: { action } });
+    const okN = (r.queued || []).length;
+    const skipN = (r.skipped || []).length;
+    toast('已排队 ' + okN + ' 个' + (skipN ? ('，跳过 ' + skipN + ' 个') : ''), 'ok');
+    await refresh();
+    startPoll();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+
+/* ── 安装包清理（一键） ── */
+async function doClean() {
+  let r;
+  try {
+    // 先 dry 拿清单（只复盘、不删），让确认框里能看到到底会删什么
+    r = await api('/api/clean', { method: 'POST', body: { dry: true } });
+  } catch (e) { toast(e.message, 'err'); return; }
+  const items = r.items || [];
+  const fgn = r.foreign_count || 0;
+  if (!items.length) {
+    toast('没有可清理的安装包' + (fgn ? '（另有 ' + fgn + ' 个不是本应用下载的，不会动）' : ''), '');
+    await refresh();
+    return;
+  }
+  const lines = items.slice(0, 8).map((i) => '· ' + i.name + '（' + fmtSize(i.size) + '）');
+  const more = items.length > 8 ? ('\n… 以及另外 ' + (items.length - 8) + ' 个') : '';
+  const where = items[0].path.replace(/\/[^/]*$/, '');
+  if (!confirm('清理 ' + items.length + ' 个安装包，共 ' + fmtSize(r.size) + '？\n\n'
+    + lines.join('\n') + more
+    + '\n\n位置：' + where
+    + (fgn ? ('\n\n同目录里另有 ' + fgn + ' 个不是本应用下载的安装包（'
+      + fmtSize(r.foreign_size) + '），不会动。') : '')
+    + '\n\n只删本应用自己下载过的包；已装好的应用不受影响。'
+    + '删掉的包以后要用可以再从 GitHub Release 下载。')) return;
+  try {
+    const d = await api('/api/clean', { method: 'POST', body: {} });
+    const n = (d.deleted || []).length;
+    const bad = (d.failed || []).length;
+    let msg = '已清理 ' + n + ' 个，释放 ' + fmtSize(d.freed);
+    if (bad) msg += '；' + bad + ' 个没删掉（' + d.failed[0].reason + '）';
+    toast(msg, bad ? '' : 'ok');
+    await refresh();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ── 任务列表（设置里） ── */
+function renderTaskList(tasks) {
+  const box = $('task-list');
+  if (!box) return;
+  box.textContent = '';
+  const shown = tasks.filter(taskFresh).slice().reverse();
+  if (!shown.length) {
+    const e = document.createElement('div');
+    e.className = 'set-hint';
+    e.textContent = '（还没有任务）';
+    box.appendChild(e);
+    return;
+  }
+  shown.forEach((t) => {
+    const row = document.createElement('div');
+    row.className = 'taskrow';
+    const head = document.createElement('div');
+    head.className = 'taskhead';
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    nm.textContent = (t.display || t.appname) + ' · ' + actionLabel(t.action);
+    head.appendChild(nm);
+    const stt = document.createElement('span');
+    stt.className = 'badge ' + (t.status === 'ok' ? 'ok'
+      : (t.status === 'failed' ? 'err' : 'new'));
+    stt.textContent = { queued: '排队中', running: '进行中', ok: '完成', failed: '失败' }[t.status] || t.status;
+    head.appendChild(stt);
+    row.appendChild(head);
+    const msg = document.createElement('div');
+    msg.className = 'taskmsg';
+    msg.textContent = t.message || '';
+    row.appendChild(msg);
+    if (t.status === 'running' || t.status === 'queued') {
+      row.appendChild(progressBlock(t, 'run'));
+    }
+    box.appendChild(row);
+  });
+}
+
+/* ── 被管理的应用列表 ── */
+function renderAppsList(list) {
+  const box = $('apps-list');
+  box.textContent = '';
+  if (!list.length) {
+    const e = document.createElement('div');
+    e.className = 'set-hint';
+    e.textContent = '（列表为空 —— 没有应用会被显示或操作）';
+    box.appendChild(e);
+    return;
+  }
+  list.forEach((it) => {
+    const row = document.createElement('div');
+    row.className = 'approw';
+
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    nm.textContent = it.display || it.appname || '(未识别)';
+    row.appendChild(nm);
+
+    if (it.appname) {
+      const an = document.createElement('span');
+      an.className = 'an';
+      an.textContent = it.appname;
+      row.appendChild(an);
+    }
+
+    const src = document.createElement('span');
+    src.className = 'src';
+    src.textContent = it.repo || it.url || '';
+    src.title = src.textContent;
+    row.appendChild(src);
+
+    if (it.tag) row.appendChild(chipSmall('tag ' + it.tag));
+    if (it.asset) row.appendChild(chipSmall('包 ' + it.asset));
+    if (it.allow_prerelease) row.appendChild(chipSmall('含预发布'));
+
+    // 换版本：把来源填回输入框并列出它的所有版本/安装包，供手动改钉
+    const repin = document.createElement('button');
+    repin.className = 'rm';
+    repin.textContent = '换版本';
+    repin.title = '改这个来源使用的版本 / 安装包';
+    repin.addEventListener('click', async () => {
+      const src = it.repo || it.url;
+      $('app-add-input').value = src;
+      picker.editing = true;
+      try {
+        await loadOptions(src);
+        toast('选好新版本后点「保存」', 'ok');
+      } catch (e) {
+        toast(e.message, 'err');
+      }
+    });
+    row.appendChild(repin);
+
+    const rm = document.createElement('button');
+    rm.className = 'rm';
+    rm.textContent = '移除';
+    rm.addEventListener('click', async () => {
+      const who = it.display || it.appname || it.repo || it.url;
+      if (!confirm('不再管理「' + who + '」？\n\n只会把它从列表里去掉，不会卸载应用、也不会删任何文件。')) return;
+      try {
+        await api('/api/apps/remove', { method: 'POST', body: { source: it.repo || it.url, appname: it.appname } });
+        toast('已移除 ' + who, 'ok');
+        await refresh();
+        doCheck($('check-btn'));
+      } catch (e) { toast(e.message, 'err'); }
+    });
+    row.appendChild(rm);
+
+    box.appendChild(row);
+  });
+}
+
+function chipSmall(text) {
+  const s = document.createElement('span');
+  s.className = 'tagchip';
+  s.textContent = text;
+  return s;
+}
+
+/* ── 动作 ── */
+async function refresh() {
+  state = await api('/api/state');
+  render();
+  return true;
+}
+
+async function doCheck(btn) {
+  // ⚠️ 不要用 innerHTML 替换按钮内容 —— 手机端 CSS 把按钮里的 span 隐藏了
+  // （#check-btn span{display:none}），一替换就会出现"图标没了、文字也被隐藏"的空按钮。
+  // 正确做法：保留图标与文字，只让它转圈 + 禁用，并把状态写到顶栏的时间文字上。
+  btn.disabled = true;
+  btn.classList.add('loading');
+  const lbl = $('last-check');
+  const prev = lbl.textContent;
+  lbl.textContent = '正在检查…';
+  try {
+    const r = await api('/api/check', { method: 'POST' });
+    state.apps = r.apps;
+    state.last_check = r.last_check;
+    render();
+    const n = (r.apps || []).filter((a) => a.update_available).length;
+    const errs = (r.apps || []).filter((a) => a.error).length;
+    if (n) toast('发现 ' + n + ' 个应用有新版本');
+    else if (errs) toast('检查完成，但有 ' + errs + ' 个应用出错', 'err');
+    else toast('全部已是最新', 'ok');
+  } catch (e) {
+    lbl.textContent = prev;
+    toast(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('loading');
+  }
+}
+
+/* 动作 → 接口（显式写出来，便于静态校验；也避免拼路径出错） */
+const ENDPOINT = {
+  download: '/api/download',
+  install: '/api/install',
+  update: '/api/update',
+};
+
+const CONFIRM = {
+  download: (a) => '下载「' + (a.display || a.appname) + '」的安装包？\n\n'
+    + '版本 ' + a.latest + '（' + fmtSize(a.size) + '）\n'
+    + '只下载到本地并校验 sha256，不会改动应用。',
+  install: (a) => '用已下载的安装包安装「' + (a.display || a.appname) + '」？\n\n'
+    + a.installed + ' → ' + a.downloaded.version + '\n'
+    + '安装过程中该应用会短暂重启，数据不会丢失。',
+  update: (a) => '下载并更新「' + (a.display || a.appname) + '」？\n\n'
+    + a.installed + ' → ' + a.latest + '\n'
+    + '先下载并校验 sha256，然后升级。过程中该应用会短暂重启，数据不会丢失。',
+};
+
+async function doAction(app, action, label) {
+  if (!confirm(CONFIRM[action](app))) return;
+  try {
+    const r = await api(ENDPOINT[action], { method: 'POST', body: { appname: app.appname } });
+    toast('已加入后台队列（' + label + '），可以关掉页面');
+    await refresh();
+    startPoll();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+
+/* ── 轮询：有任务时快轮询，空闲时慢轮询 ── */
+function startPoll() {
+  stopPoll();
+  const tick = async () => {
+    try {
+      await refresh();
+      const live = activeTasks();
+      const want = live.length ? 1000 : 10000;   // 有活儿 1s，空闲 10s
+      if (pollTimer && pollTimer.ms !== want) {
+        clearInterval(pollTimer.id);
+        pollTimer = { ms: want, id: setInterval(tick, want) };
+      }
+    } catch (e) { /* 网络抖动忽略，下一轮再试 */ }
+  };
+  pollTimer = { ms: 1000, id: setInterval(tick, 1000) };
+}
+
+function stopPoll() {
+  if (pollTimer) { clearInterval(pollTimer.id); pollTimer = null; }
+}
+
+/* ── 设置 ── */
+function openSettings() { $('settings-modal').classList.remove('hidden'); }
+function closeSettings() { $('settings-modal').classList.add('hidden'); }
+
+async function showLog() {
+  const box = $('log-box');
+  if (!box.classList.contains('hidden')) { box.classList.add('hidden'); return; }
+  try {
+    const r = await api('/api/log?lines=200');
+    box.textContent = (r.lines || []).join('\n') || '（暂无日志）';
+    box.classList.remove('hidden');
+    box.scrollTop = box.scrollHeight;
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ── 事件 ── */
+$('check-btn').addEventListener('click', (ev) => doCheck(ev.currentTarget));
+$('settings-btn').addEventListener('click', openSettings);
+$('settings-close').addEventListener('click', closeSettings);
+$('settings-modal').addEventListener('click', (ev) => {
+  if (ev.target === $('settings-modal')) closeSettings();
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') closeSettings();
+});
+$('log-btn').addEventListener('click', showLog);
+
+$('token-save').addEventListener('click', async () => {
+  const val = $('token-input').value.trim();
+  if (val && !confirm('保存这个 GitHub 访问令牌吗？\n\n它只写入本机数据目录（权限 600），'
+    + '不会随应用包分发，页面上也只回显末四位。')) return;
+  try {
+    const r = await api('/api/token', { method: 'POST', body: { token: val } });
+    $('token-input').value = '';
+    toast(r.has_token ? '令牌已保存，正在重新检查…' : '令牌已清除', 'ok');
+    await refresh();
+    if (r.has_token) doCheck($('check-btn'));
+  } catch (e) { toast(e.message, 'err'); }
+});
+
+$('dl-save').addEventListener('click', async () => {
+  const val = $('dl-input').value.trim();
+  try {
+    const r = await api('/api/settings', { method: 'POST', body: { download_dir: val } });
+    toast('下载目录已改为 ' + r.settings.download_dir, 'ok');
+    await refresh();
+    doCheck($('check-btn'));
+  } catch (e) { toast(e.message, 'err'); }
+});
+
+$('dl-reset').addEventListener('click', async () => {
+  try {
+    const r = await api('/api/settings', { method: 'POST', body: { download_dir: state.default_download_dir } });
+    $('dl-input').value = r.settings.download_dir;
+    toast('已恢复默认下载目录', 'ok');
+    await refresh();
+    doCheck($('check-btn'));
+  } catch (e) { toast(e.message, 'err'); }
+});
+
+/* ── 下载加速设置 ── */
+$('mirror-select').addEventListener('change', syncMirrorInput);
+
+$('speed-save').addEventListener('click', async () => {
+  const body = {
+    concurrency: parseInt($('conc-input').value, 10) || 4,
+    mirror: currentMirror(),
+  };
+  try {
+    const r = await api('/api/settings', { method: 'POST', body });
+    $('conc-input').value = r.settings.concurrency;
+    toast('已保存：' + r.settings.concurrency + ' 段并发 · '
+      + (r.settings.mirror ? r.settings.mirror : '直连'), 'ok');
+    await refresh();
+  } catch (e) { toast(e.message, 'err'); }
+});
+
+/* ── 分页/汇总/列表 ── */
+$('all-update').addEventListener('click', () => doAll('update'));
+$('all-download').addEventListener('click', () => doAll('download'));
+
+/* ── 安装包清理 ── */
+$('clean-btn').addEventListener('click', doClean);
+$('clean-now-btn').addEventListener('click', doClean);
+$('clean-refresh').addEventListener('click', async () => {
+  await refresh();
+  toast('已刷新', '');
+});
+$('auto-clean-input').addEventListener('change', async (ev) => {
+  const v = ev.currentTarget.checked;
+  try {
+    const r = await api('/api/settings', { method: 'POST', body: { auto_clean: v } });
+    toast(r.settings.auto_clean ? '已开启：安装成功后自动清理安装包' : '已关闭自动清理', 'ok');
+    await refresh();
+  } catch (e) {
+    ev.currentTarget.checked = !v;      // 服务端拒绝就还原开关，别显示成已生效
+    toast(e.message, 'err');
+  }
+});
+
+/* ── 设置分页 ── */
+function switchTab(name) {
+  document.querySelectorAll('#settings-tabs .tab').forEach((b) => {
+    b.classList.toggle('on', b.getAttribute('data-tab') === name);
+  });
+  document.querySelectorAll('.panes .pane').forEach((p) => {
+    p.classList.toggle('on', p.getAttribute('data-pane') === name);
+  });
+  const card = document.querySelector('#settings-modal .modal-card');
+  if (card) card.scrollTop = 0;
+}
+
+document.querySelectorAll('#settings-tabs .tab').forEach((b) => {
+  b.addEventListener('click', () => switchTab(b.getAttribute('data-tab')));
+});
+
+/* ── 主题切换 ── */
+document.querySelectorAll('#theme-seg button').forEach((b) => {
+  b.addEventListener('click', async () => {
+    const v = b.getAttribute('data-v');
+    themePref = applyTheme(v);            // 先本地生效，界面立刻变
+    try {
+      const r = await api('/api/settings', { method: 'POST', body: { theme: v } });
+      themePref = applyTheme(r.settings.theme);
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  });
+});
+
+/* ── 自动下载开关（改完立即保存） ── */
+$('auto-dl-input').addEventListener('change', async (ev) => {
+  const on = ev.currentTarget.checked;
+  try {
+    const r = await api('/api/settings', { method: 'POST', body: { auto_download: on } });
+    toast(on ? '已开启：有新版本会自动下载（不会自动安装）' : '已关闭自动下载', 'ok');
+    await refresh();
+  } catch (e) {
+    ev.currentTarget.checked = !on;
+    toast(e.message, 'err');
+  }
+});
+
+/* ── 任务列表 ── */
+$('task-clear').addEventListener('click', async () => {
+  try {
+    await api('/api/tasks/clear', { method: 'POST' });
+    await refresh();
+    toast('已清理已完成的任务', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+});
+
+/* ── 加速镜像选择器 ── */
+function fillMirrorSelect(cur, presets) {
+  const sel = $('mirror-select');
+  if (!sel) return;
+  if (sel.dataset.filled !== '1') {
+    sel.textContent = '';
+    presets.forEach((p) => {
+      const o = document.createElement('option');
+      o.value = p.prefix;
+      o.textContent = p.label;
+      sel.appendChild(o);
+    });
+    const custom = document.createElement('option');
+    custom.value = '__custom__';
+    custom.textContent = '自定义…';
+    sel.appendChild(custom);
+    sel.dataset.filled = '1';
+  }
+  // 每次都按服务端的值回填选中项 —— 否则在别处改过（或首次填自定义）会显示成旧的
+  const known = presets.some((p) => p.prefix === cur);
+  sel.value = known ? cur : '__custom__';
+  if (!known && cur) syncInput('mirror-input', cur);
+  syncMirrorInput();
+}
+
+function syncMirrorInput() {
+  const sel = $('mirror-select');
+  const box = $('mirror-custom');
+  if (sel && box) box.classList.toggle('hidden', sel.value !== '__custom__');
+}
+
+function currentMirror() {
+  const sel = $('mirror-select');
+  if (!sel) return '';
+  return sel.value === '__custom__' ? $('mirror-input').value.trim() : sel.value;
+}
+
+/* ── 添加 / 换版本：手动选版本与安装包 ── */
+
+function assetLabel(a) {
+  const parts = [a.name];
+  if (a.size) parts.push(fmtSize(a.size));
+  if (!a.sha256) parts.push('无 sha256');
+  if (a.recommended) parts.push('★ 推荐');
+  return parts.join(' · ');
+}
+
+function verLabel(r) {
+  const bits = [r.tag || '(无 tag)'];
+  if (r.published_at) bits.push(fmtTime(r.published_at).replace(/（.*/, ''));
+  if (r.prerelease) bits.push('预发布');
+  if (r.rolling) bits.push('滚动版');
+  return bits.join(' · ');
+}
+
+function fillAssetSelect() {
+  const vi = parseInt($('ver-select').value, 10) || 0;
+  const rel = picker.options.releases[vi];
+  const sel = $('asset-select');
+  sel.textContent = '';
+  (rel.assets || []).forEach((a, i) => {
+    const o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = assetLabel(a);
+    sel.appendChild(o);
+  });
+  const rec = (rel.assets || []).findIndex((a) => a.recommended);
+  sel.value = String(rec >= 0 ? rec : 0);
+}
+
+function showPicker() {
+  const box = $('app-picker');
+  const sel = $('ver-select');
+  sel.textContent = '';
+  picker.options.releases.forEach((r, i) => {
+    const o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = verLabel(r);
+    sel.appendChild(o);
+  });
+  // 默认选「第一个不是预发布/滚动版的」，没有就选第一个
+  let def = picker.options.releases.findIndex((r) => !r.prerelease && !r.rolling);
+  if (def < 0) def = 0;
+  sel.value = String(def);
+  fillAssetSelect();
+  box.classList.remove('hidden');
+  $('app-preview').classList.add('hidden');
+  $('app-confirm-btn').textContent = picker.editing ? '保存' : '添加';
+}
+
+async function loadOptions(source) {
+  const opts = await api('/api/apps/options', { method: 'POST', body: { source } });
+  picker.options = opts;
+  picker.source = opts.source || source;
+  showPicker();
+  return opts;
+}
+
+function currentPick() {
+  const vi = parseInt($('ver-select').value, 10) || 0;
+  const rel = picker.options.releases[vi];
+  const ai = parseInt($('asset-select').value, 10) || 0;
+  const asset = (rel.assets || [])[ai];
+  return { tag: rel.tag || '', asset: asset ? asset.name : '', release: rel, assetRow: asset };
+}
+
+$('app-add-btn').addEventListener('click', async () => {
+  const raw = $('app-add-input').value.trim();
+  if (!raw) { toast('请先填仓库地址或 fpk 直链', 'err'); return; }
+  const btn = $('app-add-btn');
+  btn.disabled = true;
+  picker.editing = false;
+  try {
+    await loadOptions(raw);
+    toast('选好版本和安装包后点「添加」', 'ok');
+  } catch (e) {
+    $('app-picker').classList.add('hidden');
+    toast(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('ver-select').addEventListener('change', fillAssetSelect);
+
+$('app-preview-btn').addEventListener('click', async () => {
+  const p = currentPick();
+  const box = $('app-preview');
+  box.classList.remove('hidden');
+  box.textContent = '正在识别…';
+  try {
+    const r = await api('/api/apps/preview', {
+      method: 'POST',
+      body: { source: picker.source, tag: p.tag, asset: p.asset },
+    });
+    box.textContent = [
+      '识别结果：',
+      '  应用名    ' + r.appname,
+      '  显示名    ' + (r.display_name || r.appname),
+      '  版本      ' + r.version + (r.tag ? '（Release tag ' + r.tag + '）' : '')
+        + (r.version_source === 'tag' ? '  ⚠ 版本取自 tag（包内 manifest 读不到）' : ''),
+      '  安装包    ' + (r.asset_name || '—') + (r.size ? '（' + fmtSize(r.size) + '）' : ''),
+      '  平台      ' + (r.platform || '未声明'),
+      '  本机已装  ' + (r.installed ? r.installed_version : '未安装'),
+      '  sha256    ' + (r.has_sha256 ? '有' : '没有（出于安全不会下载/安装）'),
+      '',
+      r.installed
+        ? (r.update_available ? ('可以更新：' + r.installed_version + ' → ' + r.version)
+                              : ('当前已是最新（' + r.installed_version + '）'))
+        : ('✕ 本机没有安装「' + r.appname + '」，无法管理'),
+    ].join('\n');
+  } catch (e) {
+    box.textContent = '✕ ' + e.message;
+  }
+});
+
+$('app-confirm-btn').addEventListener('click', async () => {
+  const p = currentPick();
+  const btn = $('app-confirm-btn');
+  btn.disabled = true;
+  try {
+    if (picker.editing) {
+      await api('/api/apps/pin', {
+        method: 'POST',
+        body: { source: picker.source, tag: p.tag, asset: p.asset },
+      });
+      toast('已保存', 'ok');
+    } else {
+      const r = await api('/api/apps/add', {
+        method: 'POST',
+        body: { source: picker.source, tag: p.tag, asset: p.asset },
+      });
+      toast('已加入 ' + (r.appname || ''), 'ok');
+      $('app-add-input').value = '';
+    }
+    $('app-picker').classList.add('hidden');
+    picker.editing = false;
+    await refresh();
+    doCheck($('check-btn'));
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('app-picker-cancel').addEventListener('click', () => {
+  $('app-picker').classList.add('hidden');
+  picker.editing = false;
+});
+
+$('app-add-input').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') $('app-add-btn').click();
+});
+
+$('apps-reset').addEventListener('click', async () => {
+  if (!confirm('把列表恢复成内置默认（三个自建应用）？\n\n只会改列表，不会卸载应用、也不会删文件。')) return;
+  try {
+    await api('/api/apps/reset', { method: 'POST' });
+    toast('已恢复默认列表', 'ok');
+    await refresh();
+    doCheck($('check-btn'));
+  } catch (e) { toast(e.message, 'err'); }
+});
+
+/* ── 启动 ── */
+(async function boot() {
+  try {
+    await refresh();
+    startPoll();
+    const last = state.last_check ? new Date(state.last_check).getTime() : 0;
+    if (!last || Date.now() - last > 5 * 60 * 1000) doCheck($('check-btn'));
+  } catch (e) {
+    toast('无法连接服务：' + e.message, 'err');
+  }
+})();

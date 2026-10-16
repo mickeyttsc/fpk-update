@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="FPK更新">
+  <!-- 由 scripts/make-icons.py 生成，与 ICON.PNG 共用同一套几何常量，请勿手改 -->
+  <defs>
+    <linearGradient id="fpg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f7cff"/>
+      <stop offset="1" stop-color="#7b5cff"/>
+    </linearGradient>
+  </defs>
+  <rect x="1.92" y="1.92" width="44.16" height="44.16" rx="9.6" fill="url(#fpg)"/>
+  <g fill="#FFFFFF">
+    <rect x="21.48" y="9.24" width="5.04" height="12.48" rx="0.48"/>
+    <path d="M16.92 21.24L31.08 21.24L24 30Z" stroke="#FFFFFF" stroke-width="0.96" stroke-linejoin="round"/>
+    <rect x="15.12" y="35.04" width="17.76" height="4.08" rx="1.248"/>
+  </g>
+</svg>

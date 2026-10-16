@@ -1,0 +1,16 @@
+appname               = fpk-update
+version               = 1.0.0-15
+display_name          = FPK更新
+desc                  = 一个 GitHub 上 fpk 的下载更新器：填个仓库地址，它自己识别版本、后台下载、校验 sha256，你点一下就能装上。只更新本机已安装的应用；下载可以自动，安装永远由你点。
+maintainer            = Mickey
+maintainer_url        = https://github.com/mickeyttsc/fpk-update
+distributor           = Mickey
+distributor_url       = https://github.com/mickeyttsc/fpk-update
+source                = thirdparty
+platform              = all
+ctl_stop              = true
+service_port          = 18600
+desktop_uidir         = ui
+desktop_applaunchname = fpk-update.main
+changelog             = 1.0.0-15：①新增【安装包清理】—— 安装成功后自动清理刚装的那个包（只在版本核验通过后才删；失败或装完起不来一律保留，因为它此时是回滚包），顶栏与设置里另有「一键清理」，且**只清本应用自己下载过的包**（下载完记台账），下载目录里你自己归档的 / 别的脚本放进来的 fpk 一个都不碰；②统一图标 —— 一份几何定义生成全部 7 个图标槽位（4 个 PNG + favicon + 页头标志 + 无图标时的回退图），不会再各处走形，门禁校验产物与生成器逐字节一致；③修掉 CI 打包路径（无 fnpack、纯 tar+gzip）下因管道 SIGPIPE 导致构建静默失败的问题。
+checksum              =

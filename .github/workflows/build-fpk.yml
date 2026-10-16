@@ -1,0 +1,70 @@
+name: Build FPK
+
+# 本仓库**自己就是源码**（没有上游载荷），所以 tag 就是打包版本：
+#   打 v1.0.0-14 → 构建出 fpk-update-1.0.0-14.fpk → 建 Release 并附上安装包。
+# 也可以手动触发（workflow_dispatch）先跑一遍不建 Release。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-fpk:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: build-fpk-${{ github.ref }}
+      cancel-in-progress: true
+    # ★ 必须显式声明：仓库默认 workflow 权限是 read，
+    #   不声明则建 Release 会被拒（HTTP 403）。
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 敏感信息门禁放最前面：公开仓库，凭据/内网地址进了历史撤不回来。
+      - name: Scan for secrets / private environment info
+        run: bash scripts/scan-secrets.sh
+
+      - name: Set up Node.js (前端渲染自测需要)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # tag 与源码里的版本必须一致，否则会出现「Release 叫 v1.0.0-14、包里写 1.0.0-13」
+      # 这种对不上的产物 —— 那种包装上去版本号是错的，最难查。
+      - name: Verify tag matches manifest version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          MF_VER="$(grep '^version' manifest | awk -F'=' '{print $2}' | tr -d ' ')"
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          echo "manifest 版本=$MF_VER   tag 版本=$TAG_VER"
+          if [ "$MF_VER" != "$TAG_VER" ]; then
+            echo "::error::tag($GITHUB_REF_NAME) 与 manifest 里的 version($MF_VER) 不一致"
+            exit 1
+          fi
+
+      # 只用系统 python3 + tar/gzip（不依赖 fnpack）：本仓库的构建脚本默认走这条路径，
+      # 与本地开发完全同一条，避免「本地 fnpack、CI tar」两个实现各自漂移。
+      - name: Build FPK package
+        run: |
+          bash scripts/build-fpk.sh dist
+          ls -la dist/
+          sha256sum dist/*.fpk
+
+      - name: Upload FPK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk-update-fpk
+          path: dist/*.fpk
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/*.fpk
+          generate_release_notes: true
+          draft: false
+          prerelease: false

@@ -1,0 +1,2680 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""FPK更新 —— 自建应用的更新台（后端服务）
+
+设计约束（改前必读）
+--------------------
+1. **只用 Python 标准库**。fnOS 上没有可用的 pip 环境，任何第三方依赖都会让
+   装机变脆。本文件不 import 任何非标准库模块。
+2. **本服务以 root 运行**（config/privilege: run-as=root）。因为飞牛应用中心的
+   升级通道（unix socket /var/run/com.trim.app.center.sock）只对 OfficialAppUsers
+   组开放，第三方应用用户拿不到权限。因此这里的能力被硬限死在：
+     · 只读 /var/apps 下白名单应用的版本与图标
+     · 只向 GitHub 上白名单仓库的 Release 取包
+     · 只调用应用中心的「暂存 / 升级」RPC
+   没有「安装任意 fpk」「卸载」「上传文件」这类入口，白名单来自数据目录的
+   apps.json（包内默认 3 个自建应用），网页端无法增删。
+3. **升级走的是应用中心官方的就地升级通道**（与用户在应用中心点「更新」完全
+   同一条路，日志 class=upgrade）：保数据、不重装。实测见项目 README。
+   ⚠️ 绝不使用 `appcenter-cli install-local` —— 它在 fnOS 上是「卸载再安装」，
+   重装步骤失败会把应用连同数据一起抹掉。
+4. **升级前必须校验 sha256**（取自 GitHub Release 的 asset digest），校验不过
+   一律不升级。
+5. 同一时刻只允许一个升级任务（全局锁），失败不自动重试。
+"""
+
+import hashlib
+import http.client
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import time
+import traceback
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+# ───────────────────────────── 运行环境 ─────────────────────────────
+
+APP_NAME = "fpk-update"
+
+HOST = os.environ.get("FPKU_HOST", "0.0.0.0")
+PORT = int(os.environ.get("FPKU_PORT", "18600"))
+STATIC_DIR = os.environ.get("FPKU_STATIC", "/dev/null")
+APPS_DEFAULT = os.environ.get("FPKU_APPS_DEFAULT", "")
+APPS_USER = os.environ.get("FPKU_APPS_USER", "")
+VAR_DIR = os.environ.get("FPKU_VAR", "/tmp")
+HOME_DIR = os.environ.get("FPKU_HOME", "/tmp")
+DEFAULT_DOWNLOAD_DIR = os.environ.get("FPKU_DOWNLOAD_DIR", os.path.join(VAR_DIR, "downloads"))
+APPS_ROOT = os.environ.get("FPKU_APPS_ROOT", "/var/apps")
+
+DAEMON_SOCKET = "/var/run/com.trim.app.center.sock"
+GH_TOKEN_FILE = os.path.join(VAR_DIR, "github-token.txt")
+LAST_CHECK_FILE = os.path.join(VAR_DIR, "last-check.json")
+JOB_FILE = os.path.join(VAR_DIR, "job.json")
+SETTINGS_FILE = os.path.join(VAR_DIR, "settings.json")
+PKG_REGISTRY_FILE = os.path.join(VAR_DIR, "downloads.json")
+
+CHECK_INTERVAL_MIN = 60          # 后台自动「检测」周期（只查版本，绝不自动升级）
+HTTP_TIMEOUT = 30
+DOWNLOAD_TIMEOUT = 900
+
+CST = timezone(timedelta(hours=8))
+
+_lock = threading.Lock()
+
+
+def log(msg):
+    """写运行日志。
+
+    ⚠️ 只输出到 stdout，**不要**再自己往文件里追加 —— cmd/main 启动服务时已经把
+    stdout/stderr 重定向到同一个 $TRIM_PKGVAR/fpk-update.log，两边都写会让每行
+    出现两次（实测踩过）。/api/log 读的就是那个文件。
+    """
+    ts = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+    print("[%s] %s" % (ts, msg), flush=True)
+
+
+def load_json(path, default=None):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def save_json(path, data):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp.%d" % os.getpid()
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        log("保存 %s 失败: %s" % (path, exc))
+
+
+# ───────────────────────────── 版本比较 ─────────────────────────────
+
+_VER_RE = re.compile(r"^v?(\d+(?:\.\d+)*)(?:-(\d+))?$")
+
+
+def norm_version(v):
+    v = (v or "").strip()
+    if v.startswith(("v", "V")):
+        v = v[1:]
+    return v
+
+
+def split_version(v):
+    """'8.0.31-1' -> ((8,0,31), 1)。不符合规范时返回 None。"""
+    m = _VER_RE.match((v or "").strip())
+    if not m:
+        return None
+    nums = tuple(int(x) for x in m.group(1).split("."))
+    it = int(m.group(2)) if m.group(2) else 0
+    return nums, it
+
+
+def cmp_version(a, b):
+    """a>b -> 1；a<b -> -1；相等 -> 0。无法比较时返回 None。"""
+    sa, sb = split_version(a), split_version(b)
+    if sa is None or sb is None:
+        return None
+    na, ia = sa
+    nb, ib = sb
+    n = max(len(na), len(nb))
+    na = na + (0,) * (n - len(na))
+    nb = nb + (0,) * (n - len(nb))
+    if na != nb:
+        return 1 if na > nb else -1
+    if ia != ib:
+        return 1 if ia > ib else -1
+    return 0
+
+
+def is_newer(candidate, current):
+    c = cmp_version(candidate, current)
+    return c == 1 if c is not None else False
+
+
+# ───────────────────────────── 白名单 / 应用 ─────────────────────────────
+
+APPNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+
+
+def load_whitelist():
+    """读被管理的应用列表。
+
+    每条只需给出「来源」即可：
+      {"repo": "owner/name"}                      ← 最简，appname/显示名/版本都自动识别
+      {"repo": "owner/name", "appname": "xxx"}     ← 想固定 appname 时写
+      {"repo": "owner/name", "tag": "v1.2.3"}      ← 钉住某个 Release
+      {"repo": "owner/name", "asset": "*x86*.fpk"} ← 多个附件时指定挑哪个
+      {"repo": "owner/name", "allow_prerelease": true}
+      {"url": "https://.../x.fpk"}                 ← 直链（非 GitHub 也行）
+    """
+    data = load_json(APPS_USER)
+    if not isinstance(data, dict):
+        data = load_json(APPS_DEFAULT) or {}
+    apps = data.get("apps")
+    if not isinstance(apps, list):
+        return []
+    out = []
+    for item in apps:
+        if not isinstance(item, dict):
+            continue
+        src = normalize_source(item)
+        name = src["appname"]
+        if name and not APPNAME_RE.match(name):
+            continue
+        if not src["repo"] and not src["url"]:
+            continue
+        if src["repo"] and not REPO_RE.match(src["repo"]):
+            continue
+        out.append({
+            "appname": name,
+            "display": str(item.get("display") or ""),
+            "repo": src["repo"],
+            "url": src["url"],
+            "tag": src["tag"],
+            "asset": src["asset"],
+            "allow_prerelease": src["allow_prerelease"],
+            "note": str(item.get("note") or ""),
+        })
+    return out
+
+
+def _whitelist_doc():
+    """读回原始 apps.json（保留用户的其它字段与注释性键），供增删时写回。"""
+    data = load_json(APPS_USER)
+    if not isinstance(data, dict):
+        data = load_json(APPS_DEFAULT)
+    if not isinstance(data, dict):
+        data = {}
+    if not isinstance(data.get("apps"), list):
+        data["apps"] = []
+    return data
+
+
+def save_whitelist(doc):
+    save_json(APPS_USER, doc)
+
+
+def remember_appname(repo_or_url, appname, display, version):
+    """把识别出来的 appname/显示名写回 apps.json（只填空缺，不改用户写过的值）。
+
+    为什么要写回：识别出来一次就记住，后续动作/图标/校验都用得到它，
+    用户也能在文件里看到实际识别成了什么。
+    """
+    if not appname:
+        return
+    with _lock:
+        doc = _whitelist_doc()
+        changed = False
+        for item in doc["apps"]:
+            if not isinstance(item, dict):
+                continue
+            src = normalize_source(item)
+            key = src["repo"] or src["url"]
+            if key != repo_or_url:
+                continue
+            if not src["appname"]:
+                item["appname"] = appname
+                changed = True
+            if not item.get("display") and display:
+                item["display"] = display
+                changed = True
+        if changed:
+            save_whitelist(doc)
+            log("已识别并记下 appname=%s（来源 %s，版本 %s）" % (appname, repo_or_url, version))
+
+
+def installed_version(appname):
+    path = os.path.join(APPS_ROOT, appname, "manifest")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("version"):
+                    parts = line.split("=", 1)
+                    if len(parts) == 2:
+                        return parts[1].strip().strip('"')
+    except OSError:
+        return None
+    return None
+
+
+def installed_display(appname):
+    path = os.path.join(APPS_ROOT, appname, "manifest")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("display_name"):
+                    parts = line.split("=", 1)
+                    if len(parts) == 2:
+                        return parts[1].strip().strip('"')
+    except OSError:
+        pass
+    return None
+
+
+def icon_path(appname):
+    base = os.path.join(APPS_ROOT, appname)
+    for name in ("ICON_256.PNG", "ICON.PNG", "ICON_256.png", "ICON.png"):
+        p = os.path.join(base, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+
+# ───────────────────────────── GitHub Release ─────────────────────────────
+
+def gh_token():
+    try:
+        with open(GH_TOKEN_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def write_token(tok):
+    """保存 GitHub 访问令牌（只读即可）。空字符串 = 删除，回退匿名访问。"""
+    tok = (tok or "").strip()
+    if not tok:
+        try:
+            os.unlink(GH_TOKEN_FILE)
+        except OSError:
+            pass
+        return
+    os.makedirs(os.path.dirname(GH_TOKEN_FILE), exist_ok=True)
+    tmp = GH_TOKEN_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(tok + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, GH_TOKEN_FILE)
+
+
+def token_hint():
+    """只回显令牌尾部，便于用户确认填的是哪一个，又不泄露完整值。"""
+    tok = gh_token()
+    if not tok:
+        return ""
+    return "…%s（%d 位）" % (tok[-4:], len(tok))
+
+
+def gh_get(url):
+    req = urllib.request.Request(url)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "fpk-update/1.0")
+    tok = gh_token()
+    if tok:
+        req.add_header("Authorization", "token %s" % tok)
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+
+def _gh_error_message(exc):
+    """把 GitHub 的 HTTP 错误翻译成用户能照着做的提示。"""
+    code = getattr(exc, "code", None)
+    headers = getattr(exc, "headers", None)
+    remaining = ""
+    try:
+        remaining = (headers.get("x-ratelimit-remaining") or "") if headers else ""
+    except Exception:  # noqa: BLE001
+        remaining = ""
+    if code == 403 and remaining == "0":
+        if gh_token():
+            return ("GitHub 访问令牌的额度也用尽了（5000 次/小时）—— 稍后再试，"
+                    "或换一个令牌")
+        return ("GitHub 匿名额度已用尽（60 次/小时，按出口 IP 计算，同一个 IP 上"
+                "别的程序也会消耗它）。请在「更多 → GitHub 访问令牌」里填入一个"
+                "令牌（只读即可，5000 次/小时）后重试")
+    if code == 403:
+        return "GitHub 拒绝访问（403）—— 若是限流请稍后重试；也可能是令牌权限不足"
+    if code == 404:
+        return "仓库不存在或不可见（404）"
+    if code == 401:
+        return "GitHub 访问令牌无效或已过期（401）—— 请重新填写"
+    return "GitHub 返回 HTTP %s" % code
+
+
+
+# ───────────────────────────── 远端 fpk 的 manifest（通用性的关键） ─────────────────────────────
+#
+# 为什么必须读 fpk 自己的 manifest：
+#   之前是「从 tag 猜版本、按文件名约定挑附件」，这就要求每个仓库都遵守我们的命名习惯，
+#   换个仓库（tag 叫 release-2026.10、附件叫 xxx_linux_amd64.fpk）就认不出来。
+#   而 fpk 内层的 manifest 才是 fnOS 安装时真正读的那份 —— 以它为准，tag 和文件名怎么
+#   起都无所谓，任何仓库都能用。
+#
+# 怎么做到不必下载整个包：
+#   fpk 是 gzip 包，而 fnOS 要求外层第一条必须是 manifest（fnpack 与本仓门禁都遵守）。
+#   于是用 HTTP Range 只取开头几百 KB，做「部分解压」就能拿到 manifest。
+#   实测 GitHub Release 直链支持 Range。
+
+MANIFEST_CACHE_FILE = os.path.join(VAR_DIR, "manifest-cache.json")
+_manifest_cache = None
+
+# 常见「滚动 tag」——不是版本号，按约定跳过（除非用户显式钉 tag）
+ROLLING_TAGS = {"latest", "nightly", "dev", "snapshot", "rolling", "edge", "canary", "test"}
+
+ARCH_KEYS = {
+    "x86": ["x86_64", "amd64", "x86", "x64", "win64"],
+    "arm": ["aarch64", "arm64", "arm"],
+}
+
+
+def device_arch():
+    """本机架构，用于在多个附件里挑对的那个。"""
+    m = (os.uname().machine or "").lower() if hasattr(os, "uname") else ""
+    if m in ("aarch64", "arm64", "armv8l", "armv7l"):
+        return "arm"
+    return "x86"
+
+
+def _load_manifest_cache():
+    global _manifest_cache
+    if _manifest_cache is None:
+        d = load_json(MANIFEST_CACHE_FILE)
+        _manifest_cache = d if isinstance(d, dict) else {}
+    return _manifest_cache
+
+
+def _save_manifest_cache():
+    if _manifest_cache is not None:
+        save_json(MANIFEST_CACHE_FILE, _manifest_cache)
+
+
+def _parse_manifest(text):
+    """解析 manifest 的 key = value 行。"""
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip().lower()
+        v = v.strip().strip('"')
+        if k and k not in out:
+            out[k] = v
+    return out
+
+
+
+def _tar_walk_for(raw, want=b"manifest"):
+    """在（可能被截断的）tar 字节流里逐条走，找到 want 这条普通文件的内容。
+
+    ⚠️ 不能假设 manifest 是第一条 —— 实测第三方打包（如 jia070310/lemon-muisc）
+    把 app.tgz 放在最前、manifest 放在最后；只有 fnpack / 本仓的产物才是 manifest 在前。
+    所以这里必须真的按 tar 结构逐条跳（用每条的 size 算下一条的偏移）。
+    """
+    off = 0
+    n = len(raw)
+    while off + 512 <= n:
+        header = raw[off:off + 512]
+        if header[:1] == b"\0":
+            break  # 结束块
+        name = header[:100].split(b"\0", 1)[0].decode("utf-8", "replace").strip()
+        try:
+            size = int((header[124:136].split(b"\0", 1)[0].strip() or b"0"), 8)
+        except ValueError:
+            return None
+        typeflag = header[156:157]
+        body_off = off + 512
+        if name == want.decode() and typeflag in (b"0", b"", b"\0"):
+            body = raw[body_off:body_off + size]
+            return body if len(body) == size else None
+        off = body_off + ((size + 511) // 512) * 512
+    return None
+
+
+def _manifest_from_tail(raw):
+    """在文件尾部窗口里找 manifest（应对「manifest 在最后」的打包方式）。
+
+    只认「name 字段正好是 manifest 且后面全是 NUL」的 tar 头，避免误命中正文里的字符串。
+    """
+    idx = 0
+    while True:
+        i = raw.find(b"manifest", idx)
+        if i < 0:
+            return None
+        hdr = raw[i:i + 512]
+        if len(hdr) == 512 and hdr[9:100].strip(b"\0") == b"":
+            try:
+                size = int((hdr[124:136].split(b"\0", 1)[0].strip() or b"0"), 8)
+            except ValueError:
+                size = -1
+            if 0 < size < 1 << 20:
+                body = raw[i + 512:i + 512 + size]
+                if len(body) == size:
+                    return body
+        idx = i + 1
+
+
+def _fetch_range(url, spec, timeout=None):
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", "fpk-update/1.0")
+    req.add_header("Range", spec)
+    with urllib.request.urlopen(req, timeout=timeout or HTTP_TIMEOUT) as r:
+        return r.read()
+
+
+def _fetch_head(url, nbytes):
+    """取开头 nbytes。Range 不被支持时退回普通 GET（只读前 nbytes 就断开）。
+
+    实测：部分 GitHub Release 资源的 CDN 对 Range 直接回 501 Unsupported client
+    range（如 jia070310/lemon-muisc 的附件）。这种情况不能当成"读不到包"，
+    退回普通 GET 仍能拿到开头（manifest 在前的包照样能解出来）。
+    """
+    try:
+        return _fetch_range(url, "bytes=0-%d" % (nbytes - 1))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (400, 416, 501, 505):
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "fpk-update/1.0")
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+                return r.read(nbytes)
+        raise
+
+
+def _fetch_tail(url, nbytes):
+    """取结尾 nbytes；不支持 Range 时返回 None（由调用方走整包兜底）。"""
+    try:
+        return _fetch_range(url, "bytes=-%d" % nbytes)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (400, 416, 501, 505):
+            return None
+        raise
+
+
+# 小于这个体积的包，读不出 manifest 时直接整包下载来读（省事且可靠）
+FULL_FETCH_LIMIT = 64 * 1024 * 1024
+
+
+def _decode_manifest(body):
+    """manifest 正文 → dict（顺带做必填校验）。"""
+    mf = _parse_manifest(body.decode("utf-8", "replace"))
+    if not mf.get("appname") or not mf.get("version"):
+        raise RuntimeError("安装包的 manifest 缺 appname/version")
+    return {
+        "appname": mf.get("appname", ""),
+        "version": mf.get("version", ""),
+        "display_name": mf.get("display_name", ""),
+        "platform": mf.get("platform", ""),
+        "changelog": mf.get("changelog", ""),
+        "service_port": mf.get("service_port", ""),
+    }
+
+
+def read_fpk_manifest(url, size_hint=None, max_bytes=768 * 1024, use_cache=True):
+    """读取远端 fpk 的 manifest（优先只读首尾，必要时整包下载）。返回 dict。
+
+    manifest 的位置随打包方式不同，实测有两种：
+      · fnpack / 本仓：manifest 在**最前** → 读开头即可；
+      · 第三方打包（实测 lemon-music）：app.tgz 在前、manifest 在**最后** → 读结尾。
+    再不行（Range 被拒、位置古怪）且包不大 → 整包下到临时文件用 tarfile 读。
+    """
+    import zlib
+
+    key = "%s|%s" % (url, size_hint if size_hint is not None else "?")
+    cache = _load_manifest_cache()
+    if use_cache and key in cache:
+        hit = cache[key]
+        if isinstance(hit, dict) and hit.get("appname"):
+            return hit
+
+    body = None
+
+    # ① 开头窗口：部分解压后按 tar 结构逐条走
+    try:
+        head = _fetch_head(url, max_bytes)
+        d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        raw = d.decompress(head)
+        body = _tar_walk_for(raw)
+    except zlib.error:
+        body = None
+    except (urllib.error.URLError, OSError):
+        raise
+
+    # ② 结尾窗口：应对「manifest 在最后」
+    if not body:
+        tail = _fetch_tail(url, 256 * 1024)
+        if tail:
+            body = _manifest_from_tail(tail)
+
+    # ③ 整包兜底：包不大就直接下下来用 tarfile 读（最可靠）
+    if not body and (size_hint is None or size_hint <= FULL_FETCH_LIMIT):
+        tmp = None
+        try:
+            import tempfile
+            fd, tmp = tempfile.mkstemp(prefix="fpku-probe-", suffix=".fpk", dir=VAR_DIR)
+            os.close(fd)
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "fpk-update/1.0")
+            with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT) as r, open(tmp, "wb") as f:
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            mf = read_local_fpk_manifest(tmp)
+            log("整包下载后读到 manifest：%s %s（%s 字节）"
+                % (mf["appname"], mf["version"], os.path.getsize(tmp)))
+            cache[key] = mf
+            _save_manifest_cache()
+            return mf
+        except Exception as exc:  # noqa: BLE001 - 兜底失败就交给调用方回退
+            log("整包兜底读取 manifest 失败：%s" % exc)
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    if not body:
+        raise RuntimeError("没能在安装包里找到 manifest（首/尾/整包都试过了）")
+
+    info = _decode_manifest(body)
+    cache[key] = info
+    if len(cache) > 200:
+        for k in list(cache)[:100]:
+            cache.pop(k, None)
+    _save_manifest_cache()
+    return info
+
+
+def read_local_fpk_manifest(path, max_members=400):
+    """读**本地** fpk 的 manifest（下载完之后用它做最终复核）。
+
+    与远端读法不同：文件已在本地，直接用 tarfile 流式读，不猜位置。
+    这是安装前的最后一道关口 —— 检测阶段可以用 tag 之类的启发式，
+    但真正要装的那个包必须自己说明它是什么。
+    """
+    import tarfile
+    try:
+        with tarfile.open(path, "r:gz") as tf:
+            for i, m in enumerate(tf):
+                if i > max_members:
+                    break
+                if m.name == "manifest" and m.isfile():
+                    f = tf.extractfile(m)
+                    if f is None:
+                        continue
+                    return _decode_manifest(f.read())
+    except (tarfile.TarError, OSError, EOFError) as exc:
+        raise RuntimeError("读取本地安装包失败：%s" % exc)
+    raise RuntimeError("本地安装包里没有 manifest")
+
+
+# ───────────────────────────── 源解析（仓库 / 直链） ─────────────────────────────
+
+def _pick_asset(assets, want_arch=None, pattern=None):
+    """在多个 .fpk 附件里挑一个。
+
+    优先级（都只是「同一架构内怎么选」，不改变架构判定）：
+      1. 用户写的 asset 通配符命中者优先
+      2. 匹配本机架构的优先，明确标了对方架构的排除
+      3. 名字里带 iframe（fnOS 桌面小窗入口）的优先于带 url/browser 的
+         —— 实测 guan-ry/FanControlServerApp 同一架构同时发 -iframe 与 -url 两个包，
+         而本项目的既定形态是「桌面图标点开 = 小窗」。**不能靠"取最大文件"撞运气**：
+         两个包体积只差 184 字节，哪天反过来就会挑错，用户点图标变成弹浏览器。
+      4. 名字里带 untested 的排最后（作者自己标了没测过）
+      5. 都不满足时取体积大的
+    """
+    import fnmatch
+    cands = list(assets)
+    if pattern:
+        pat = str(pattern).strip()
+        if any(ch in pat for ch in "*?["):
+            hit = [a for a in cands if fnmatch.fnmatch(str(a.get("name") or ""), pat)]
+        else:
+            # 不带通配符 = 精确指定某个附件（UI 里下拉选出来的就是这个）
+            hit = [a for a in cands if str(a.get("name") or "") == pat]
+        if hit:
+            cands = hit
+    want_arch = want_arch or device_arch()
+    other = "arm" if want_arch == "x86" else "x86"
+
+    def token_re(word):
+        return re.compile(r"(?:^|[-_.])%s(?:[-_.]|$)" % re.escape(word), re.I)
+
+    re_iframe = token_re("iframe")
+    re_url = token_re("url")
+    re_browser = token_re("browser")
+    re_untested = token_re("untested")
+
+    def score(a):
+        n = str(a.get("name") or "")
+        s = 0
+        if any(k in n.lower() for k in ARCH_KEYS.get(want_arch, [])):
+            s -= 1000
+        if any(k in n.lower() for k in ARCH_KEYS.get(other, [])):
+            s += 1000
+        if re_iframe.search(n):
+            s -= 40
+        if re_url.search(n) or re_browser.search(n):
+            s += 40
+        if re_untested.search(n):
+            s += 200
+        return s
+
+    return sorted(cands, key=lambda a: (score(a), -int(a.get("size") or 0)))[0]
+
+
+def normalize_source(entry):
+    """把一条白名单配置归一化成 {'repo','url','tag','asset','allow_prerelease','appname'}。"""
+    repo = str(entry.get("repo") or "").strip()
+    url = str(entry.get("url") or "").strip()
+    # 允许直接贴完整 GitHub 地址
+    m = re.match(r"^https?://github\.com/([^/]+)/([^/?#]+?)(?:\.git)?/?$", repo or url)
+    if m:
+        repo = "%s/%s" % (m.group(1), m.group(2))
+        url = "" if url == repo or m.group(0) == url else url
+    return {
+        "repo": repo,
+        "url": url,
+        "tag": str(entry.get("tag") or "").strip(),
+        "asset": str(entry.get("asset") or "").strip(),
+        "allow_prerelease": bool(entry.get("allow_prerelease")),
+        "appname": str(entry.get("appname") or "").strip(),
+    }
+
+
+def find_release(repo, allow_prerelease=False, want_tag=""):
+    """找一个可用的 Release（不要求 tag 长得像版本号 —— 版本从 fpk 里读）。"""
+    data = gh_get("https://api.github.com/repos/%s/releases?per_page=30" % repo)
+    if not isinstance(data, list):
+        raise ValueError("GitHub 返回格式异常")
+    for rel in data:
+        if rel.get("draft"):
+            continue
+        tag = str(rel.get("tag_name") or "")
+        if want_tag:
+            if tag != want_tag:
+                continue
+        else:
+            if rel.get("prerelease") and not allow_prerelease:
+                continue
+            if tag.strip().lower() in ROLLING_TAGS and not allow_prerelease:
+                continue
+        assets = [a for a in (rel.get("assets") or [])
+                  if str(a.get("name") or "").lower().endswith(".fpk")]
+        if not assets:
+            continue
+        return {
+            "tag": tag,
+            "prerelease": bool(rel.get("prerelease")),
+            "published_at": rel.get("published_at"),
+            "notes": (rel.get("body") or "").strip()[:400],
+            "assets": assets,
+        }
+    return None
+
+
+def list_options(source, max_releases=20):
+    """列出一个来源所有可选的「版本」与「安装包」，供用户手动挑。
+
+    为什么要这个：同一架构常常有多个包（实测 guan-ry/FanControlServerApp 同时发
+    `-iframe.fpk` 与 `-url.fpk`；kyeo-hub/CleanFnOS 发 `_x86` 与 `_arm`），
+    而不同人的用法不同（小窗 vs 浏览器入口、x86 vs arm）。自动取舍只能给个**推荐**，
+    最终该由用户定 —— 所以这里把全部选项摊开，并标出「推荐」是哪个。
+
+    只发一次 GitHub 请求，不逐个读 manifest（读 manifest 放到 preview 那一步，
+    只读用户真正选中的那个）。
+    """
+    src = normalize_source(source)
+    out = []
+
+    if not src["repo"]:
+        if not src["url"]:
+            raise RuntimeError("配置里既没有 repo 也没有 url")
+        name = os.path.basename(urlparse(src["url"]).path) or "package.fpk"
+        out.append({
+            "tag": "",
+            "published_at": None,
+            "prerelease": False,
+            "draft": False,
+            "notes": "（直链来源：只有一个安装包，没有 sha256 摘要，出于安全不会下载/安装）",
+            "assets": [{"name": name, "size": None, "sha256": "", "recommended": True}],
+        })
+        return {"source_kind": "url", "releases": out, "device_arch": device_arch()}
+
+    data = gh_get("https://api.github.com/repos/%s/releases?per_page=50" % src["repo"])
+    if not isinstance(data, list):
+        raise ValueError("GitHub 返回格式异常")
+    for rel in data:
+        if rel.get("draft"):
+            continue
+        assets = [a for a in (rel.get("assets") or [])
+                  if str(a.get("name") or "").lower().endswith(".fpk")]
+        if not assets:
+            continue
+        rec = _pick_asset(assets)
+        rows = []
+        for a in assets:
+            digest = str(a.get("digest") or "")
+            rows.append({
+                "name": a.get("name"),
+                "size": a.get("size"),
+                "sha256": digest.split(":", 1)[1] if digest.startswith("sha256:") else "",
+                "recommended": a is rec,
+            })
+        out.append({
+            "tag": rel.get("tag_name") or "",
+            "published_at": rel.get("published_at"),
+            "prerelease": bool(rel.get("prerelease")),
+            "draft": False,
+            "rolling": (rel.get("tag_name") or "").strip().lower() in ROLLING_TAGS,
+            "notes": (rel.get("body") or "").strip()[:200],
+            "assets": rows,
+        })
+        if len(out) >= max_releases:
+            break
+    if not out:
+        raise RuntimeError("仓库 %s 没有任何带 .fpk 附件的 Release" % src["repo"])
+    return {"source_kind": "repo", "releases": out, "device_arch": device_arch()}
+
+
+def _version_from_tag(tag):
+    v = norm_version(tag)
+    return v if split_version(v) is not None else ""
+
+
+def resolve_source(entry):
+    """解析一条配置 → 目标版本信息。
+
+    版本优先取 **fpk 自身的 manifest**（权威，与 fnOS 安装时读的是同一份）；
+    读不到时退回「用 tag 当版本」（大多数仓库 tag 就是版本号），并在结果里标明来源，
+    页面会据此提示。真正安装前还会用本地包再复核一次（见 read_local_fpk_manifest）。
+
+    返回 {'appname','version','version_source','display_name','platform','tag',
+          'asset_name','asset_url','sha256','size','published_at','notes','source_kind'}
+    """
+    src = normalize_source(entry)
+    if not src["repo"] and not src["url"]:
+        raise RuntimeError("配置里既没有 repo 也没有 url")
+
+    if src["url"] and not src["repo"]:
+        asset_url = src["url"]
+        asset_name = os.path.basename(urlparse(asset_url).path) or "package.fpk"
+        rel = {"tag": "", "published_at": None,
+               "notes": "（直链来源，没有 sha256 摘要，出于安全不会下载/安装）"}
+        sha, size = "", None
+    else:
+        rel = find_release(src["repo"], src["allow_prerelease"], src["tag"])
+        if not rel:
+            raise RuntimeError("仓库 %s 没有可用的 Release（含 .fpk 附件）" % src["repo"])
+        asset = _pick_asset(rel["assets"], pattern=src["asset"] or None)
+        asset_url = asset.get("browser_download_url")
+        asset_name = asset.get("name")
+        digest = str(asset.get("digest") or "")
+        sha = digest.split(":", 1)[1] if digest.startswith("sha256:") else ""
+        size = asset.get("size")
+
+    appname = src["appname"]
+    version = ""
+    display = ""
+    platform = ""
+    version_source = ""
+
+    try:
+        mf = read_fpk_manifest(asset_url, size)
+        appname = appname or mf["appname"]
+        version = mf["version"]
+        display = mf.get("display_name", "")
+        platform = mf.get("platform", "")
+        version_source = "fpk"
+    except Exception as exc:  # noqa: BLE001 - 读不到就退回 tag，但要如实标注
+        log("读取 %s 的 manifest 失败（%s），回退用 tag 当版本" % (asset_name, exc))
+        version = _version_from_tag(rel.get("tag") or "")
+        version_source = "tag" if version else ""
+        if not version:
+            raise RuntimeError("无法确定版本：既读不到安装包里的 manifest，"
+                               "tag（%s）也不是版本号" % (rel.get("tag") or "无"))
+        if not appname:
+            raise RuntimeError("无法确定应用名：安装包的 manifest 读不到，"
+                               "请在配置里写明 appname")
+
+    return {
+        "appname": appname,
+        "version": version,
+        "version_source": version_source,
+        "display_name": display,
+        "platform": platform,
+        "tag": rel.get("tag") or "",
+        "asset_name": asset_name,
+        "asset_url": asset_url,
+        "sha256": sha,
+        "size": size,
+        "published_at": rel.get("published_at"),
+        "notes": rel.get("notes") or "",
+        "source_kind": "url" if (src["url"] and not src["repo"]) else "repo",
+    }
+
+
+# ───────────────────────────── 应用中心守护进程 RPC ─────────────────────────────
+
+class UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, sock_path, timeout=HTTP_TIMEOUT):
+        super().__init__("localhost", timeout=timeout)
+        self.sock_path = sock_path
+
+    def connect(self):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(self.timeout)
+        s.connect(self.sock_path)
+        self.sock = s
+
+
+def daemon_call(route, payload, timeout=HTTP_TIMEOUT):
+    body = json.dumps(payload).encode("utf-8")
+    conn = UnixHTTPConnection(DAEMON_SOCKET, timeout=timeout)
+    try:
+        conn.request("POST", route, body=body,
+                     headers={"Content-Type": "application/json",
+                              "Content-Length": str(len(body))})
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8", "replace")
+    finally:
+        conn.close()
+    try:
+        env = json.loads(raw)
+    except ValueError:
+        raise RuntimeError("应用中心返回非 JSON：%s" % raw[:200])
+    code = env.get("code", -1)
+    if code != 0:
+        raise RuntimeError("应用中心拒绝（code=%s）：%s" % (code, env.get("msg") or raw[:200]))
+    return env.get("data") or {}
+
+
+def stage_fpk(fpk_path, progress=None):
+    """把本地 fpk 交给应用中心识别（只识别，不改任何东西）。"""
+    if progress:
+        progress("staging", "正在让应用中心识别安装包…")
+    task = daemon_call("/rpc/v1/download/task",
+                       {"packageSourceType": "file", "path": fpk_path})
+    tid = task.get("downloadTaskId")
+    if not tid:
+        raise RuntimeError("应用中心未返回暂存任务 ID")
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        st = daemon_call("/rpc/v1/download/status", {"downloadTaskId": tid})
+        status = st.get("status")
+        if status == 2:
+            if not st.get("appName") or not st.get("version"):
+                raise RuntimeError("暂存完成但应用中心未能识别安装包内容")
+            return st
+        if status != 1:
+            raise RuntimeError("暂存失败（status=%s）：%s" % (status, st.get("message")))
+        time.sleep(1)
+    raise RuntimeError("暂存超时")
+
+
+def upgrade_via_daemon(fpk_path, appname, target_version, progress=None):
+    """驱动应用中心的【就地升级】通道（与界面点「更新」同一条路）。
+
+    实测要点（fnOS 1.2.0800）：
+      · 必须先暂存，否则 update/info 返回 10100（包不存在）
+      · update/info 里取 installedVolumeID —— 取不到就中止（别猜卷，会丢数据）
+      · 任务状态：1=进行中 2=成功 5=守护进程已不再持有该任务（**不代表失败**，
+        要用「最终版本」来判定）
+    """
+    def say(stage, msg):
+        if progress:
+            progress(stage, msg)
+
+    staged = stage_fpk(fpk_path, progress)
+    if staged.get("appName") != appname:
+        raise RuntimeError("安装包应用名不符：包内为 %s，期望 %s"
+                           % (staged.get("appName"), appname))
+    pkg_type = staged.get("packageType") or "app"
+
+    say("precheck", "正在读取当前安装位置…")
+    info = daemon_call("/rpc/v1/update/info", {
+        "appName": appname,
+        "updateVersion": target_version,
+        "packageType": pkg_type,
+        "language": "zh-CN",
+    })
+    wizard = info.get("wizardInfo") or {}
+    volume = wizard.get("installedVolumeID")
+    if not isinstance(volume, int) or volume <= 0:
+        raise RuntimeError("取不到当前安装卷（installedVolumeID=%r），已中止以保护数据" % volume)
+
+    say("upgrading", "正在升级（%s → %s）…" % (wizard.get("version") or "?", target_version))
+    task = daemon_call("/rpc/v1/update/task", {
+        "appName": appname,
+        "updateVersion": target_version,
+        "packageType": pkg_type,
+        "systemParameters": {
+            "agreedToProtocol": True,
+            "installVolumeID": volume,
+            "dataVolumeId": volume,
+            "immediateStart": False,
+        },
+        "customParameters": [],
+        "language": "zh-CN",
+    })
+    task_id = task.get("taskId")
+    if not task_id:
+        raise RuntimeError("应用中心未返回升级任务 ID")
+
+    deadline = time.time() + 15 * 60
+    final = None
+    while time.time() < deadline:
+        st = daemon_call("/rpc/v1/common/status", {"taskId": task_id})
+        status = st.get("status")
+        pct = st.get("progress")
+        if status == 2:
+            final = "ok"
+            break
+        if status == 5:
+            final = "unknown"
+            break
+        if status == 1:
+            if progress and pct is not None:
+                progress("upgrading", "正在升级… %s%%" % pct)
+            time.sleep(2)
+            continue
+        detail = st.get("message") or st.get("outputText") or ""
+        raise RuntimeError("升级任务失败（status=%s）：%s" % (status, detail))
+    if final is None:
+        raise RuntimeError("升级任务超时未完成（已等待 15 分钟）")
+
+    say("verifying", "正在核验升级结果…")
+    time.sleep(2)
+    now_ver = installed_version(appname)
+    if norm_version(now_ver or "") != norm_version(target_version):
+        if final == "unknown":
+            raise RuntimeError("应用中心已不再持有该任务，且当前版本仍为 %s（期望 %s）"
+                               % (now_ver, target_version))
+        raise RuntimeError("升级结束但版本未变化：当前 %s（期望 %s）" % (now_ver, target_version))
+
+    # 升级流程通常会自动拉起应用；这里幂等地确认一次
+    try:
+        subprocess.run(["appcenter-cli", "start", appname],
+                       capture_output=True, timeout=90)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    say("done", "升级完成：%s → %s" % (norm_version(target_version), norm_version(now_ver)))
+    return True
+
+
+# ───────────────────────────── 检测 ─────────────────────────────
+
+def check_one(app):
+    """查一个应用的最新版本（只读，不改任何东西）。
+
+    通用性要点：**目标版本来自 fpk 自身的 manifest**，不是从 tag 猜的。
+    所以仓库的 tag 怎么命名、附件叫什么名字都无所谓；appname 也可以留空自动识别。
+    """
+    src_key = app["repo"] or app["url"]
+    item = {
+        "appname": app["appname"],
+        "display": app["display"],
+        "note": app["note"],
+        "installed": installed_version(app["appname"]) if app["appname"] else None,
+        "manifest_display": installed_display(app["appname"]) if app["appname"] else None,
+        "repo": app["repo"],
+        "url": app["url"],
+        "tag": app["tag"],
+        "source": src_key,
+        "has_icon": bool(app["appname"]) and icon_path(app["appname"]) is not None,
+        "latest": None,
+        "update_available": False,
+        "error": None,
+        "published_at": None,
+        "notes": "",
+        "asset_name": None,
+        "size": None,
+        "downloaded": None,
+        "detected_appname": None,
+        "sha256": "",
+    }
+    try:
+        rel = resolve_source(app)
+    except urllib.error.HTTPError as exc:
+        item["error"] = _gh_error_message(exc)
+        return item
+    except urllib.error.URLError as exc:
+        item["error"] = "连不上源：%s" % (exc.reason,)
+        return item
+    except Exception as exc:  # noqa: BLE001 - 网络/格式原因多样，统一呈现
+        item["error"] = "检查失败：%s" % exc
+        return item
+
+    # 以 fpk 内层 manifest 为准（这是 fnOS 安装时真正读的那份）
+    detected = rel["appname"]
+    item["detected_appname"] = detected
+    if app["appname"] and detected != app["appname"]:
+        item["error"] = ("安装包内的应用名（%s）与配置的 appname（%s）不一致 —— "
+                         "这个包不是给该应用用的" % (detected, app["appname"]))
+        return item
+    if not app["appname"]:
+        # 没写 appname：用识别出来的那个，并写回配置记住
+        item["appname"] = detected
+        item["installed"] = installed_version(detected)
+        item["manifest_display"] = installed_display(detected)
+        item["has_icon"] = icon_path(detected) is not None
+        remember_appname(src_key, detected, rel.get("display_name") or "", rel["version"])
+
+    if not item["display"]:
+        item["display"] = (rel.get("display_name") or item["manifest_display"]
+                           or item["appname"])
+    if not item["installed"]:
+        item["error"] = "未安装（本机没有 %s）" % item["appname"]
+        return item
+
+    # 架构对不上就别动
+    plat = (rel.get("platform") or "").strip().lower()
+    if plat and plat not in ("all", device_arch()):
+        item["error"] = ("安装包面向 %s，本机是 %s —— 已跳过" % (plat, device_arch()))
+        return item
+
+    item["latest"] = rel["version"]
+    item["published_at"] = rel["published_at"]
+    item["notes"] = rel["notes"]
+    item["asset_name"] = rel["asset_name"]
+    item["size"] = rel["size"]
+    item["sha256"] = rel.get("sha256") or ""
+    item["version_source"] = rel.get("version_source") or ""
+    item["tag"] = rel.get("tag") or ""
+    item["update_available"] = is_newer(rel["version"], item["installed"])
+    # 关系：钉住的版本可能比已装的旧（用于回滚）—— 界面据此显示不同徽章
+    _c = cmp_version(rel["version"], item["installed"])
+    item["relation"] = {1: "newer", 0: "same", -1: "older"}.get(_c, "unknown")
+    if not item["sha256"]:
+        item["error"] = ("该来源没有 sha256 摘要，出于安全不会下载/安装"
+                         "（可改用仓库来源，GitHub 的 Release 附件一般带 digest）")
+        item["update_available"] = False
+    elif item["version_source"] == "tag":
+        item["note"] = ((item["note"] + " ").strip()
+                        + "（版本取自 Release tag：该安装包读不到 manifest）").strip()
+
+    # 本地是否已经下好这一版（决定「安装」按钮能不能点）
+    try:
+        d = download_dir()
+        local = os.path.join(d, rel["asset_name"])
+        if os.path.isfile(local):
+            item["downloaded"] = {
+                "version": rel["version"],
+                "path": local,
+                "size": os.path.getsize(local),
+                "complete": (rel.get("size") is None
+                             or os.path.getsize(local) == rel["size"]),
+            }
+    except OSError:
+        pass
+    return item
+
+
+AUTO_DL_STATE = os.path.join(VAR_DIR, "auto-download.json")
+AUTO_DL_RETRY_SEC = 30 * 60      # 同一个应用两次自动下载至少隔这么久
+
+
+def _auto_download(results):
+    """【自动下载】把「有新版本但本地还没下」的排进下载队列。
+
+    ⚠️ **只下载，绝不自动安装** —— 装不装、什么时候装仍然由用户点。
+    这是刻意的边界：自动替换正在运行的应用（尤其承载会话的 Ekko Studio）风险太大。
+    """
+    tried = load_json(AUTO_DL_STATE)
+    if not isinstance(tried, dict):
+        tried = {}
+    now = time.time()
+    n = 0
+    for r in results:
+        if not r.get("update_available") or r.get("error"):
+            continue
+        dl = r.get("downloaded")
+        if dl and dl.get("complete") and norm_version(dl.get("version") or "") == norm_version(r.get("latest") or ""):
+            continue          # 这一版的包已经在本地了
+        # 退避：同一个应用 30 分钟内只自动试一次。
+        # 不加这道闸，一个下不动的包（网络/CDN 拒绝等）会每轮检测都重试一遍，没完没了。
+        try:
+            last = float(tried.get(r["appname"]) or 0)
+        except (TypeError, ValueError):
+            last = 0
+        if now - last < AUTO_DL_RETRY_SEC:
+            log("[auto] %s 上次自动下载在 %.0f 分钟前，本轮跳过（30 分钟内只试一次）"
+                % (r["appname"], (now - last) / 60))
+            continue
+        try:
+            tid = enqueue(r["appname"], "download")
+            tried[r["appname"]] = now
+            n += 1
+            log("[auto] 有新版本，自动排入下载：%s %s → %s（任务 %s）"
+                % (r["appname"], r.get("installed"), r.get("latest"), tid))
+        except Exception as exc:  # noqa: BLE001
+            log("[auto] 自动下载排队失败 %s：%s" % (r["appname"], exc))
+    if n:
+        save_json(AUTO_DL_STATE, tried)
+        log("[auto] 本轮自动下载共排队 %d 个任务" % n)
+
+
+def run_check(trigger="manual"):
+    apps = load_whitelist()
+    if not apps:
+        log("白名单为空，跳过检测")
+        return []
+    log("开始检测（%s）：%d 个应用" % (trigger, len(apps)))
+    results = [check_one(a) for a in apps]
+    for r in results:
+        log("  %s: 已装=%s 最新=%s 可更新=%s%s"
+            % (r["appname"], r["installed"], r["latest"],
+               r["update_available"], (" 错误=" + r["error"]) if r["error"] else ""))
+    with _lock:
+        save_json(LAST_CHECK_FILE, {
+            "at": datetime.now(CST).isoformat(timespec="seconds"),
+            "trigger": trigger,
+            "apps": results,
+        })
+    if load_settings().get("auto_download"):
+        _auto_download(results)
+    return results
+
+
+def cached_state():
+    data = load_json(LAST_CHECK_FILE)
+    if not isinstance(data, dict):
+        return {"at": None, "trigger": None, "apps": []}
+    return data
+
+
+# ───────────────────────────── 内建下载服务 ─────────────────────────────
+#
+# 三件事：
+#   1) 任务队列 —— 下载/安装都在后台线程里跑，**页面关掉也继续**；重新打开能看到进度。
+#      队列顺序执行（一次一个），避免几个大包互相抢带宽。
+#   2) 真实进度 —— 已下字节 / 总量 / 百分比 / 速度 / 剩余时间，边下边报。
+#   3) 下载加速 —— 分段并发（Range 分段多线程）+ 可配置镜像回退。
+#
+# 安全：无论直连还是镜像、单流还是分段，**最终字节必须通过 sha256 校验**，不过就删除。
+# 所以用第三方加速镜像不降低安全性 —— 镜像只能影响速度，改不了内容（哈希对不上会被拒）。
+
+TASKS_FILE = os.path.join(VAR_DIR, "tasks.json")
+TASKS_KEEP = 60
+_tasks_lock = threading.RLock()
+_worker_wake = threading.Condition(_tasks_lock)
+_worker_thread = None
+
+
+def _worker_alive():
+    """工作线程是否还活着（服务重启后残留的 running 状态要靠它判断）。"""
+    return bool(_worker_thread and _worker_thread.is_alive())
+
+
+def _last_task(tasks):
+    """最近一条任务（用于界面显示"上次做了什么"）。"""
+    return dict(tasks[-1]) if tasks else {}
+
+
+def now_iso():
+    return datetime.now(CST).isoformat(timespec="seconds")
+
+
+def _load_tasks():
+    d = load_json(TASKS_FILE)
+    if not isinstance(d, dict) or not isinstance(d.get("tasks"), list):
+        d = {"seq": 0, "tasks": []}
+    if not isinstance(d.get("seq"), int):
+        d["seq"] = 0
+    return d
+
+
+def _save_tasks(d):
+    tasks = [t for t in d.get("tasks", []) if isinstance(t, dict)]
+    if len(tasks) > TASKS_KEEP:
+        live = [t for t in tasks if t.get("status") in ("running", "queued")]
+        done = [t for t in tasks if t.get("status") not in ("running", "queued")]
+        keep = max(0, TASKS_KEEP - len(live))
+        tasks = (done[-keep:] if keep else []) + live
+    d["tasks"] = tasks
+    save_json(TASKS_FILE, d)
+
+
+def list_tasks():
+    with _tasks_lock:
+        return list(_load_tasks()["tasks"])
+
+
+def current_task():
+    with _tasks_lock:
+        for t in _load_tasks()["tasks"]:
+            if t.get("status") == "running":
+                return dict(t)
+    return None
+
+
+def update_task(tid, **kw):
+    if not tid:
+        return
+    with _tasks_lock:
+        d = _load_tasks()
+        for t in d["tasks"]:
+            if t.get("id") == tid:
+                t.update(kw)
+                t["updated_at"] = now_iso()
+                break
+        _save_tasks(d)
+
+
+def clear_finished_tasks():
+    with _tasks_lock:
+        d = _load_tasks()
+        d["tasks"] = [t for t in d["tasks"] if t.get("status") in ("running", "queued")]
+        _save_tasks(d)
+    return list_tasks()
+
+
+def enqueue(appname, action):
+    """把一次动作放进队列（后台执行），返回任务 id。重复排队会被合并。"""
+    if action not in ACTIONS:
+        raise ValueError("未知动作：%s" % action)
+    app = _resolve_app(appname)
+    if not app:
+        raise ValueError("该应用不在列表里")
+    with _tasks_lock:
+        d = _load_tasks()
+        for t in d["tasks"]:
+            if (t.get("appname") == appname and t.get("action") == action
+                    and t.get("status") in ("queued", "running")):
+                return t["id"]          # 同一个应用的同一动作已在排队/运行，不重复排
+        d["seq"] = int(d.get("seq") or 0) + 1
+        tid = "t%d" % d["seq"]
+        d["tasks"].append({
+            "id": tid, "appname": appname, "display": app["display"] or appname,
+            "action": action, "status": "queued", "stage": "queued",
+            "message": "排队中…", "percent": 0,
+            "created_at": now_iso(), "updated_at": now_iso(),
+        })
+        _save_tasks(d)
+        _worker_wake.notify_all()
+    return tid
+
+
+def worker_loop():
+    """队列工作线程：顺序取任务执行。页面关掉/刷新都不影响它。"""
+    log("下载服务：队列工作线程已启动")
+    while True:
+        tid = appname = action = None
+        with _tasks_lock:
+            d = _load_tasks()
+            for t in d["tasks"]:
+                if t.get("status") == "queued":
+                    tid, appname, action = t["id"], t.get("appname"), t.get("action")
+                    t["status"] = "running"
+                    t["stage"] = "starting"
+                    t["message"] = "正在启动…"
+                    t["started_at"] = now_iso()
+                    _save_tasks(d)
+                    break
+            if tid is None:
+                _worker_wake.wait(timeout=30)
+                continue
+        try:
+            ACTIONS[action](tid, appname)
+        except Exception as exc:  # noqa: BLE001 - 单个任务失败不能拖垮队列
+            log("[%s] 任务 %s 异常：%s" % (appname, action, exc))
+            log(traceback.format_exc())
+            _fail_task(tid, appname, exc)
+
+
+# ── 下载引擎 ──
+
+def _fmt_speed(bps):
+    if not bps or bps <= 0:
+        return ""
+    return _human(bps) + "/s"
+
+
+def _fmt_eta(sec):
+    if sec is None:
+        return ""
+    sec = int(sec)
+    if sec < 60:
+        return "%d 秒" % sec
+    if sec < 3600:
+        return "%d 分 %d 秒" % (sec // 60, sec % 60)
+    return "%d 小时 %d 分" % (sec // 3600, (sec % 3600) // 60)
+
+
+def _dl_message(kw):
+    """把进度字段拼成一句人话（卡片与任务面板都用它）。"""
+    done, total = kw.get("downloaded"), kw.get("total")
+    parts = []
+    if total:
+        parts.append("%s / %s" % (_human(done), _human(total)))
+        if kw.get("percent") is not None:
+            parts.append("%d%%" % kw["percent"])
+    elif done:
+        parts.append(_human(done))
+    sp = _fmt_speed(kw.get("speed"))
+    if sp:
+        parts.append(sp)
+    eta = _fmt_eta(kw.get("eta"))
+    if eta:
+        parts.append("剩 " + eta)
+    if kw.get("segmented"):
+        parts.append("分段加速")
+    head = kw.get("message") or "正在下载…"
+    return (head + " " + " · ".join(parts)).strip() if parts else head
+
+
+class Downloader:
+    """内建下载器：分段并发 + 断点续传 + 镜像回退 + 实时进度。
+
+    流程：
+      1. 逐个候选地址（按设置顺序）探测：发 `Range: bytes=0-0`，看是否 206 且能读到
+         总长度 —— 决定「能不能分段」。（实测部分 CDN 对 Range 回 501，那就退回单流。）
+      2. 能分段且文件够大 → 按段并发下到 `dest.partN`，**已下好的段直接复用**（断点续传）。
+         不能分段 → 单流下到 `dest.part`（也支持 Range 续传）。
+      3. 合并 → 校验 sha256 → 改名。校验不过一律删除，绝不留可疑文件。
+    """
+
+    SEG_MIN = 4 * 1024 * 1024      # 小于这个体积不分段（收益抵不过开销）
+    PROBE_TIMEOUT = 25
+
+    def __init__(self, urls, dest, sha256="", size=None, on_progress=None,
+                 concurrency=4, timeout=DOWNLOAD_TIMEOUT):
+        self.urls = [u for u in urls if u]
+        if not self.urls:
+            raise ValueError("没有可用的下载地址")
+        self.dest = dest
+        self.sha256 = (sha256 or "").lower()
+        self.size = size if isinstance(size, int) and size > 0 else None
+        self.on_progress = on_progress or (lambda **kw: None)
+        self.concurrency = max(1, min(8, int(concurrency or 1)))
+        self.timeout = timeout
+        self.total = self.size
+        self.done_bytes = 0
+        self.url = self.urls[0]
+        self.segmented = False
+        self._lock = threading.Lock()
+        self._samples = []
+
+    def run(self):
+        last_err = None
+        for url in self.urls:
+            self.url = url
+            try:
+                total, ranges = self._probe(url)
+                if total:
+                    self.total = total
+                self._report("downloading", "正在下载…")
+                if ranges and self.total and self.total >= self.SEG_MIN and self.concurrency > 1:
+                    self.segmented = True
+                    self._segmented(self.total)
+                else:
+                    self._single()
+                got = _sha256_file(self.dest)
+                if self.sha256 and got != self.sha256:
+                    os.unlink(self.dest)
+                    raise RuntimeError("sha256 校验失败（期望 %s…，实际 %s…）"
+                                       % (self.sha256[:16], got[:16]))
+                return {"path": self.dest, "size": os.path.getsize(self.dest),
+                        "sha256": got, "url": url, "segmented": self.segmented}
+            except Exception as exc:  # noqa: BLE001 - 换下一个候选地址重试
+                last_err = exc
+                log("下载失败（%s）：%s" % (url, exc))
+                self._cleanup_parts()
+                self.done_bytes = 0
+                self.segmented = False
+                continue
+        raise RuntimeError("所有下载地址都失败了：%s" % last_err)
+
+    # ── 内部 ──
+    def _probe(self, url):
+        """探测 (总长度或 None, 是否支持 Range)。"""
+        req = urllib.request.Request(url)
+        req.add_header("User-Agent", "fpk-update/1.0")
+        req.add_header("Range", "bytes=0-0")
+        try:
+            with urllib.request.urlopen(req, timeout=self.PROBE_TIMEOUT) as r:
+                code = getattr(r, "status", None) or r.getcode()
+                cr = r.headers.get("Content-Range") or ""
+                if code == 206 and "/" in cr:
+                    tail = cr.rsplit("/", 1)[1].strip()
+                    if tail.isdigit():
+                        return int(tail), True
+                cl = r.headers.get("Content-Length")
+                return (int(cl) if cl and cl.isdigit() else None), False
+        except urllib.error.HTTPError as exc:
+            if exc.code in (400, 416, 501, 505):
+                req2 = urllib.request.Request(url, method="HEAD")
+                req2.add_header("User-Agent", "fpk-update/1.0")
+                try:
+                    with urllib.request.urlopen(req2, timeout=self.PROBE_TIMEOUT) as r2:
+                        cl = r2.headers.get("Content-Length")
+                        return (int(cl) if cl and cl.isdigit() else None), False
+                except Exception:  # noqa: BLE001
+                    return None, False
+            raise
+
+    def _report(self, stage, message):
+        with self._lock:
+            now = time.time()
+            self._samples.append((now, self.done_bytes))
+            self._samples = [(t, b) for (t, b) in self._samples if now - t <= 4]
+            speed = 0.0
+            if len(self._samples) >= 2:
+                (t0, b0), (t1, b1) = self._samples[0], self._samples[-1]
+                if t1 > t0:
+                    speed = (b1 - b0) / (t1 - t0)
+            done, total = self.done_bytes, self.total
+        pct = int(done * 100 / total) if total else None
+        eta = int(max(0, total - done) / speed) if (total and speed > 1024) else None
+        self.on_progress(stage=stage, message=message, percent=pct, downloaded=done,
+                         total=total, speed=speed, eta=eta, url=self.url,
+                         segmented=self.segmented)
+
+    def _cleanup_parts(self):
+        d = os.path.dirname(self.dest) or "."
+        base = os.path.basename(self.dest)
+        try:
+            for n in os.listdir(d):
+                if n.startswith(base + ".part") or n == base + ".merge":
+                    try:
+                        os.unlink(os.path.join(d, n))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
+    def _single(self):
+        part = self.dest + ".part"
+        have = os.path.getsize(part) if os.path.isfile(part) else 0
+        if self.total and have >= self.total:
+            os.replace(part, self.dest)
+            self.done_bytes = have
+            self._report("downloading", "已完成（复用上次下好的文件）")
+            return
+        headers = {"User-Agent": "fpk-update/1.0"}
+        if have:
+            headers["Range"] = "bytes=%d-" % have
+        req = urllib.request.Request(self.url, headers=headers)
+        mode = "ab" if have else "wb"
+        self.done_bytes = have
+        with urllib.request.urlopen(req, timeout=self.timeout) as r, open(part, mode) as f:
+            last = time.time()
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+                self.done_bytes += len(chunk)
+                if time.time() - last >= 0.4:
+                    last = time.time()
+                    self._report("downloading", "正在下载…")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(part, self.dest)
+
+    def _segmented(self, total):
+        n = max(1, min(self.concurrency, (total + self.SEG_MIN - 1) // self.SEG_MIN))
+        step = (total + n - 1) // n
+        segs = []
+        for i in range(n):
+            start = i * step
+            end = min(total - 1, start + step - 1)
+            if start > end:
+                break
+            segs.append((i, start, end))
+
+        for (i, start, end) in segs:      # 复用已下好的段（断点续传）
+            p = "%s.part%d" % (self.dest, i)
+            want = end - start + 1
+            if os.path.isfile(p) and os.path.getsize(p) == want:
+                self.done_bytes += want
+        self._report("downloading", "分段下载中（%d 段并发）…" % len(segs))
+
+        errors = []
+        lock = threading.Lock()
+
+        def fetch(i, start, end):
+            p = "%s.part%d" % (self.dest, i)
+            want = end - start + 1
+            if os.path.isfile(p) and os.path.getsize(p) == want:
+                return
+            req = urllib.request.Request(self.url)
+            req.add_header("User-Agent", "fpk-update/1.0")
+            req.add_header("Range", "bytes=%d-%d" % (start, end))
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                    got = 0
+                    last = time.time()
+                    with open(p, "wb") as f:
+                        while True:
+                            chunk = r.read(1 << 20)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            got += len(chunk)
+                            with lock:
+                                self.done_bytes += len(chunk)
+                            if time.time() - last >= 0.4:
+                                last = time.time()
+                                self._report("downloading", "分段下载中…")
+                        f.flush()
+                        os.fsync(f.fileno())
+                if got != want:
+                    raise RuntimeError("第 %d 段长度不符（期望 %d，得到 %d）" % (i, want, got))
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append("第 %d 段：%s" % (i, exc))
+
+        threads = [threading.Thread(target=fetch, args=s, daemon=True) for s in segs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        if errors:
+            raise RuntimeError("；".join(errors[:3]))
+
+        self._report("verifying", "正在合并并校验…")
+        tmp = self.dest + ".merge"
+        with open(tmp, "wb") as out:
+            for (i, _s, _e) in segs:
+                with open("%s.part%d" % (self.dest, i), "rb") as f:
+                    shutil.copyfileobj(f, out, 1 << 20)
+        os.replace(tmp, self.dest)
+        for (i, _s, _e) in segs:
+            try:
+                os.unlink("%s.part%d" % (self.dest, i))
+            except OSError:
+                pass
+
+
+def download_urls(asset_url, st=None):
+    """候选下载地址：配了加速镜像就先走镜像，直连兜底（镜像挂了自动回落）。
+
+    注意：走镜像不降低安全性 —— 下完照样要过 sha256 校验，哈希对不上直接丢弃。
+    """
+    st = st or load_settings()
+    out = []
+    prefix = (st.get("mirror") or "").strip()
+    if prefix and asset_url.startswith(("http://github.com/", "https://github.com/")):
+        out.append(prefix.rstrip("/") + "/" + asset_url)
+    out.append(asset_url)
+    if prefix and out and out[0] == asset_url:
+        out = [asset_url]     # 镜像不适用于这个地址，只走直连
+    return out
+
+
+# ── 动作实现（都在队列工作线程里跑） ──
+
+def _resolve_app(appname):
+    apps = {a["appname"]: a for a in load_whitelist()}
+    return apps.get(appname)
+
+
+def _task_progress(tid):
+    def progress(stage, message, **fields):
+        kw = {"stage": stage}
+        if fields:
+            kw["message"] = _dl_message(dict(fields, message=message))
+            for k in ("percent", "downloaded", "total", "speed", "eta"):
+                if k in fields:
+                    kw[k] = fields[k]
+        else:
+            kw["message"] = message
+        update_task(tid, **kw)
+        log("[task %s] %s: %s" % (tid, stage, kw.get("message")))
+    return progress
+
+
+def _download_package(app, rel, tid):
+    """把 Release 附件下载到下载目录并校验 sha256。返回 (路径, 字节数, sha256, manifest)。"""
+    if not rel.get("sha256"):
+        raise RuntimeError("该来源没有 sha256 摘要，出于安全拒绝下载")
+    st = load_settings()
+    d = st["download_dir"]
+    os.makedirs(d, exist_ok=True)
+    fname = rel["asset_name"]
+    fpk_path = os.path.join(d, fname)
+
+    urls = download_urls(rel["asset_url"], st)
+    dl = Downloader(urls, fpk_path, sha256=rel["sha256"], size=rel.get("size"),
+                    on_progress=_task_progress(tid),
+                    concurrency=st.get("concurrency") or 4)
+    res = dl.run()
+    log("[%s] 已下载 %s size=%s sha256=%s 来源=%s%s"
+        % (app["appname"], fpk_path, res["size"], res["sha256"][:16], res["url"],
+           "（分段）" if res.get("segmented") else ""))
+
+    # 下载完立刻用本地包复核身份 —— 权威口径（与 fnOS 安装时读的是同一份 manifest）
+    mf = read_local_fpk_manifest(fpk_path)
+    if mf["appname"] != app["appname"]:
+        raise RuntimeError("下载到的安装包属于应用「%s」，与目标「%s」不符 —— 已中止"
+                           % (mf["appname"], app["appname"]))
+    # 记进台账：清理功能只认这份台账，同目录里用户自己的备份文件不会被误删
+    record_package(fpk_path, app["appname"], mf["version"], res["size"], res["sha256"])
+    return fpk_path, res["size"], res["sha256"], mf
+
+
+def do_download(tid, appname):
+    """【只下载】：下到本地并校验 sha256，不改动任何应用。"""
+    app = _resolve_app(appname)
+    if not app:
+        raise RuntimeError("该应用不在列表里")
+    try:
+        update_task(tid, stage="checking", message="正在确认最新版本…")
+        rel = resolve_source(app)
+        fpk_path, total, got, mf = _download_package(app, rel, tid)
+        update_task(tid, status="ok", stage="downloaded", percent=100,
+                    message="已下载 %s（%s，sha256 %s…）" % (rel["asset_name"], _human(total), got[:16]),
+                    version=mf["version"], path=fpk_path, size=total, sha256=got,
+                    finished_at=now_iso())
+    finally:
+        # 下完要立刻刷新检测结果 —— 否则卡片上的「已下载/本地包」会一直停在旧状态，
+        # 直到下一次检测（可能是一小时后）才更新（原来只有 do_update 刷新，是个疏漏）。
+        _refresh_after_action()
+
+
+def do_install(tid, appname):
+    """【只安装】：用下载目录里已有的 fpk 走应用中心就地升级，不联网下载。"""
+    app = _resolve_app(appname)
+    if not app:
+        raise RuntimeError("该应用不在列表里")
+    try:
+        update_task(tid, stage="checking", message="正在核对本地安装包…")
+        rel = resolve_source(app)
+        d = download_dir()
+        fpk_path = os.path.join(d, rel["asset_name"])
+        if not os.path.isfile(fpk_path):
+            raise RuntimeError("下载目录里没有 %s —— 请先点「下载」" % rel["asset_name"])
+        got = _sha256_file(fpk_path)
+        if rel.get("sha256") and got != rel["sha256"]:
+            raise RuntimeError("本地安装包 sha256 与 Release 不一致（可能已损坏或被替换）："
+                               "期望 %s…，实际 %s…" % (rel["sha256"][:16], got[:16]))
+        mf = read_local_fpk_manifest(fpk_path)
+        if mf["appname"] != appname:
+            raise RuntimeError("本地安装包属于应用「%s」，与目标「%s」不符" % (mf["appname"], appname))
+        target_ver = mf["version"]
+        cur = installed_version(appname)
+        if norm_version(cur or "") == norm_version(target_ver):
+            update_task(tid, status="ok", stage="done", percent=100,
+                        message="已是该版本（%s），无需安装" % cur, version=target_ver,
+                        finished_at=now_iso())
+            return
+        upgrade_via_daemon(fpk_path, appname, target_ver, progress=_task_progress(tid))
+        note = clean_after_install(appname, fpk_path, target_ver)
+        update_task(tid, status="ok", stage="done", percent=100,
+                    message="安装完成：%s → %s%s" % (cur, target_ver, note), version=target_ver,
+                    path=("" if note else fpk_path), finished_at=now_iso())
+        log("[%s] 安装成功 %s -> %s" % (appname, cur, target_ver))
+    finally:
+        _refresh_after_action()
+
+
+def _refresh_after_action():
+    """动作结束后刷新一次检测结果（失败也不能影响任务本身的结论）。"""
+    try:
+        run_check(trigger="after-action")
+    except Exception:  # noqa: BLE001
+        log(traceback.format_exc())
+
+
+def do_update(tid, appname):
+    """【下载并更新】：下载 → 校验 → 应用中心就地升级 → 核验。"""
+    app = _resolve_app(appname)
+    if not app:
+        raise RuntimeError("该应用不在列表里")
+    fpk_path = None
+    try:
+        update_task(tid, stage="checking", message="正在确认最新版本…")
+        rel = resolve_source(app)
+        cur = installed_version(appname)
+        if not is_newer(rel["version"], cur):
+            update_task(tid, status="ok", stage="done", percent=100,
+                        message="已是最新版本（%s）" % cur, version=cur,
+                        finished_at=now_iso())
+            return
+        fpk_path, _total, _got, mf = _download_package(app, rel, tid)
+        upgrade_via_daemon(fpk_path, appname, mf["version"], progress=_task_progress(tid))
+        note = clean_after_install(appname, fpk_path, mf["version"])
+        if note:
+            fpk_path = ""                 # 已清理，别再当回滚包写在任务里
+        update_task(tid, status="ok", stage="done", percent=100,
+                    message="更新完成：%s → %s%s" % (cur, mf["version"], note),
+                    version=mf["version"], path=fpk_path, finished_at=now_iso())
+        log("[%s] 更新成功 %s -> %s" % (appname, cur, mf["version"]))
+    except Exception as exc:  # noqa: BLE001
+        _fail_task(tid, appname, exc, keep_path=fpk_path)
+        return
+    finally:
+        _refresh_after_action()
+
+
+def _fail_task(tid, appname, exc, keep_path=None):
+    detail = str(exc)
+    log("[%s] 失败：%s" % (appname, detail))
+    keep = ""
+    if keep_path and os.path.isfile(keep_path):
+        keep = "（已下载的安装包保留在 %s，可用于回滚）" % keep_path
+    update_task(tid, status="failed", stage="error",
+                message="%s %s" % (detail, keep), finished_at=now_iso())
+
+
+def _sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _human(n):
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "?"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%.0f %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
+        n /= 1024.0
+    return "?"
+
+
+ACTIONS = {
+    "download": do_download,
+    "install": do_install,
+    "update": do_update,
+}
+
+# ───────────────────────────── 设置 ─────────────────────────────
+#
+# 本应用【没有登录/密码】—— 打开即用。为了安全，能力被硬限死（见文件头说明），
+# 且若将来要挂到公网，请在反向代理层加认证（如 Lucky 的 Basic Auth），
+# 不要把本服务直接暴露到公网。
+#
+# settings.json 里目前五项：
+#   download_dir  —— 安装包下载目录（默认 $TRIM_PKGVAR/downloads）
+#   concurrency   —— 分段并发数（1-8，默认 4；1 = 单流不分段）
+#   mirror        —— 加速镜像前缀（"" = 直连；非空时先走镜像，直连兜底）
+#   auto_download —— 检测到有新版本时自动下载（**只下载，绝不自动安装**）
+#   auto_clean    —— 安装成功后自动清理刚装的那个包（默认开；装成功了这个包就没用了，
+#                    而且它是刚下下来的、随时能从 Release 再取。失败时一律保留作回滚包）
+#   theme         —— 界面主题：auto（跟随系统）/ light / dark
+THEME_CHOICES = ("auto", "light", "dark")
+MIRROR_PRESETS = [
+    {"key": "", "label": "直连（默认）", "prefix": ""},
+    {"key": "gh-proxy", "label": "gh-proxy.com", "prefix": "https://gh-proxy.com"},
+    {"key": "ghfast", "label": "ghfast.top", "prefix": "https://ghfast.top"},
+    {"key": "ghproxy-net", "label": "ghproxy.net", "prefix": "https://ghproxy.net"},
+    {"key": "gh-ddlc", "label": "gh.ddlc.top", "prefix": "https://gh.ddlc.top"},
+]
+
+
+def load_settings():
+    data = load_json(SETTINGS_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    dd = str(data.get("download_dir") or "").strip()
+    if not dd or not os.path.isabs(dd):
+        dd = DEFAULT_DOWNLOAD_DIR
+    try:
+        conc = int(data.get("concurrency") or 4)
+    except (TypeError, ValueError):
+        conc = 4
+    conc = max(1, min(8, conc))
+    mir = str(data.get("mirror") or "").strip()
+    if mir and not re.match(r"^https?://[^\s]+$", mir):
+        mir = ""
+    th = str(data.get("theme") or "auto").strip().lower()
+    if th not in THEME_CHOICES:
+        th = "auto"
+    # 装完自动清理安装包（默认开）：装成功了这个包就没用了，而它是刚下下来的、
+    # 随时能从 Release 再取。失败/未核验通过时绝不删（保留作回滚包）。
+    auto_clean = data.get("auto_clean", True)
+    return {"download_dir": dd, "concurrency": conc, "mirror": mir,
+            "auto_download": bool(data.get("auto_download")),
+            "auto_clean": bool(auto_clean),
+            "theme": th}
+
+
+def download_dir():
+    return load_settings()["download_dir"]
+
+
+def validate_download_dir(path):
+    """校验用户填的下载目录。返回 (ok, 归一化路径或错误信息)。
+
+    拒绝的几类（都是会真出事的）：
+      · 相对路径 —— 进程工作目录不确定，落点会漂
+      · / 或 /vol* 这类过宽的根
+      · /vol*/@appcenter/... —— 应用安装目录，升级时会被整体替换
+      · /vol*/@appdata|@apphome|@appconf|@appmeta|@appshare|@apptemp/...
+        —— fnOS 应用私有目录，写进去会被覆盖、也可能破坏别的应用
+        （唯独本应用自己的 @appdata 是允许的）
+      · /tmp、/var/tmp —— 系统重启就没了
+    允许：本应用自己的数据目录、用户存储（/vol*/<uid>/...）、以及任意其它可写目录。
+    """
+    p = os.path.normpath((path or "").strip())
+    if not p or not os.path.isabs(p):
+        return False, "必须是绝对路径（例如 /vol2/backups/fpk）"
+    if p in ("/",) or re.match(r"^/vol[0-9]+$", p):
+        return False, "不能直接用存储根目录，请指定一个子目录"
+    if re.match(r"^/vol[0-9]+/@appcenter(/|$)", p):
+        return False, "不能放在应用安装目录（@appcenter）里 —— 升级时会被整体替换"
+    # fnOS 的应用私有目录一律不许写：写进去会被应用/系统覆盖，也可能破坏别的应用。
+    # 自己的 @appdata 例外（那是本应用自己的地盘）。
+    m_priv = re.match(r"^/vol[0-9]+/@(appdata|apphome|appconf|appmeta|appshare|apptemp)(/|$)", p)
+    if m_priv:
+        kind = m_priv.group(1)
+        if kind == "appdata":
+            m_sub = re.match(r"^/vol[0-9]+/@appdata/([^/]+)(/|$)", p)
+            if m_sub and m_sub.group(1) == APP_NAME:
+                pass                     # 自己的数据目录，允许
+            else:
+                return False, "不能放在应用数据目录（@appdata/…）里 —— 那是应用自己的地盘"
+        else:
+            return False, ("不能放在 fnOS 应用私有目录（@%s）里 —— 那是应用自己的地盘，"
+                           "写进去会被覆盖或破坏" % kind)
+    if p in ("/tmp", "/var/tmp") or p.startswith("/tmp/") or p.startswith("/var/tmp/"):
+        return False, "不能放在 /tmp 下 —— 系统重启会清空，下载好的安装包会丢"
+    try:
+        os.makedirs(p, exist_ok=True)
+    except OSError as exc:
+        return False, "无法创建目录：%s" % exc
+    probe = os.path.join(p, ".fpk-update-write-test")
+    try:
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.unlink(probe)
+    except OSError as exc:
+        return False, "目录不可写：%s" % exc
+    return True, p
+
+
+def save_settings(new):
+    cur = load_settings()
+    cur.update(new)
+    save_json(SETTINGS_FILE, cur)
+    return cur
+
+
+# ─────────────────── 安装包台账与清理（一键清理 / 装完自动清理） ───────────────────
+#
+# 为什么要有「台账」而不是「把下载目录里的 *.fpk 全删了」：
+# 下载目录是用户自己选的，很可能就是他放安装包备份的目录 —— 里面除了本应用下的包，
+# 还躺着他自己归档的旧版本、别处 manual 拷进来的包。一律全删就是事故。
+# 所以只清理「本应用确实下载过的（台账）」，以及「与当前这一版附件同名的（本来就是
+# 本应用要用的那个文件）」，其余文件一概不碰。
+
+
+def _load_registry():
+    data = load_json(PKG_REGISTRY_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_registry(d):
+    save_json(PKG_REGISTRY_FILE, d)
+
+
+def record_package(path, appname="", version="", size=0, sha256=""):
+    """记下本应用下载过的安装包。清理功能只认这份台账。"""
+    p = os.path.realpath(path)
+    d = _load_registry()
+    d[p] = {"appname": appname, "version": version, "size": int(size or 0),
+            "sha256": (sha256 or "")[:16], "at": now_iso()}
+    if len(d) > 500:                      # 只留最近 500 条，避免台账无限膨胀
+        for k in list(d)[:-500]:
+            d.pop(k, None)
+    _save_registry(d)
+    return p
+
+
+def forget_package(path):
+    p = os.path.realpath(path)
+    d = _load_registry()
+    if d.pop(p, None) is not None:
+        _save_registry(d)
+
+
+def _foreign_asset_paths():
+    """本目录里「当前版本对应的那个附件」的路径 —— 这些**不是**本应用下载的。
+
+    用途只有一个：让界面如实告诉你「这些我看见了，但不碰」。
+    为什么不把它们列入可清理：下载目录往往就是用户归档安装包的目录，而他大概率
+    从别处（启动脚本、手工拷贝）把包放进来的 —— 那是他的回滚包。实测中这里躺着
+    一份 357MB 的 Ekko Studio 包，而它在 GitHub 上的附件被重传过，删掉就再也拿不回
+    逐字节相同的一份。清理功能只该清「本应用自己下下来的」，不该替用户决定归档去留。
+    """
+    out = {}
+    try:
+        d = download_dir()
+    except Exception:                     # noqa: BLE001
+        return out
+    for r in (cached_state().get("apps") or []):
+        nm = r.get("asset_name")
+        if nm:
+            out[os.path.realpath(os.path.join(d, nm))] = {
+                "appname": r.get("appname") or "", "version": r.get("latest") or ""}
+    return out
+
+
+def _package_in_use(path):
+    """正在被进行中/排队中的任务使用的包不许删。"""
+    p = os.path.realpath(path)
+    for t in list_tasks():
+        if t.get("status") in ("running", "queued") and t.get("path"):
+            try:
+                if os.path.realpath(t["path"]) == p:
+                    return True
+            except OSError:
+                pass
+    return False
+
+
+def list_packages():
+    """列出「可以清理的安装包」—— **只含本应用自己下载过的**（台账）。
+
+    同目录里其它来源的包不进这个清单（见 _foreign_asset_paths）。
+    """
+    try:
+        os.path.realpath(download_dir())
+    except Exception:                     # noqa: BLE001
+        return []
+    seen, reg, changed = {}, _load_registry(), False
+    for p, meta in list(reg.items()):
+        if not os.path.isfile(p):         # 已经不在了 → 顺手把台账清干净
+            reg.pop(p, None)
+            changed = True
+            continue
+        seen[p] = dict(meta)
+    if changed:
+        _save_registry(reg)
+    items = []
+    for p, meta in seen.items():
+        try:
+            sz = os.path.getsize(p)
+        except OSError:
+            continue
+        items.append({"path": p, "name": os.path.basename(p),
+                      "appname": meta.get("appname") or "",
+                      "version": meta.get("version") or "",
+                      "size": sz, "at": meta.get("at") or "",
+                      "in_download_dir": os.path.dirname(p) == os.path.realpath(download_dir()),
+                      "locked": _package_in_use(p)})
+    items.sort(key=lambda x: (x["appname"], x["name"]))
+    return items
+
+
+def foreign_packages():
+    """同目录里本应用**不会动**的安装包（只用于如实告知用户）。"""
+    owned = {os.path.realpath(i["path"]) for i in list_packages()}
+    out = []
+    for p, meta in _foreign_asset_paths().items():
+        if p in owned or not os.path.isfile(p):
+            continue
+        try:
+            sz = os.path.getsize(p)
+        except OSError:
+            continue
+        out.append({"name": os.path.basename(p), "size": sz,
+                    "appname": meta.get("appname") or ""})
+    out.sort(key=lambda x: x["name"])
+    return out
+
+
+def package_summary():
+    items = list_packages()
+    fgn = foreign_packages()
+    return {"count": len(items), "size": sum(i["size"] for i in items),
+            "foreign_count": len(fgn), "foreign_size": sum(i["size"] for i in fgn)}
+
+
+def _safe_unlink(path):
+    """删一个安装包。所有护栏都在这一个函数里，清理功能不可能越界。
+
+    逐条拒绝：非法路径 / 符号链接 / 非 .fpk / 不在当前下载目录的直属层级 /
+    文件不存在 / 正被进行中的任务占用。
+    """
+    if os.path.islink(str(path or "")):
+        return False, "这是符号链接，拒绝删除"
+    p = os.path.realpath(str(path or ""))
+    if not p or not os.path.isabs(p):
+        return False, "路径不合法"
+    if not p.lower().endswith(".fpk"):
+        return False, "只清理 .fpk 安装包"
+    if os.path.dirname(p) != os.path.realpath(download_dir()):
+        return False, "不在当前的安装包下载目录里，拒绝删除"
+    if not os.path.isfile(p):
+        return False, "文件不存在"
+    if _package_in_use(p):
+        return False, "正被进行中的任务使用，请稍后再试"
+    if p not in _load_registry():
+        # 兜底：不是本应用下载的包，一律不删。目录里可能躺着用户的归档/回滚包。
+        return False, "不是本应用下载的安装包，拒绝删除"
+    os.unlink(p)
+    forget_package(p)
+    return True, ""
+
+
+def clean_packages():
+    """一键清理：删掉所有可清理的安装包，返回删了什么、释放了多少、哪些没删掉。"""
+    deleted, failed, freed = [], [], 0
+    for it in list_packages():
+        if it["locked"]:
+            failed.append({"name": it["name"], "reason": "正被进行中的任务使用"})
+            continue
+        ok, why = _safe_unlink(it["path"])
+        if ok:
+            deleted.append(it["name"])
+            freed += it["size"]
+        else:
+            failed.append({"name": it["name"], "reason": why})
+    return {"deleted": deleted, "failed": failed, "freed": freed}
+
+
+def clean_after_install(appname, fpk_path, target_version):
+    """安装成功后清理「刚装的这个包」（可选，默认开）。
+
+    只在两道核验都过了才删：**装完的版本确实等于目标版本**，且应用目录还在。
+    任何一样不成立就保留安装包 —— 它此时是回滚包，删了就是自断后路。
+    返回给任务消息用的后缀。
+    """
+    if not load_settings().get("auto_clean", True):
+        return ""
+    if not fpk_path or not os.path.isfile(fpk_path):
+        return ""
+    try:
+        got = norm_version(installed_version(appname) or "")
+        if got != norm_version(target_version):
+            log("[%s] 升级后核验到的版本是 %s（目标 %s），保留安装包不清理"
+                % (appname, got or "?", target_version))
+            return ""
+        if not os.path.isdir(os.path.join(APPS_ROOT, appname)):
+            log("[%s] 应用目录不存在，保留安装包不清理" % appname)
+            return ""
+    except OSError:
+        return ""
+    ok, why = _safe_unlink(fpk_path)
+    if ok:
+        log("[%s] 安装成功，已清理安装包 %s" % (appname, fpk_path))
+        return "，安装包已清理"
+    log("[%s] 安装包未清理：%s" % (appname, why))
+    return ""
+
+
+# ───────────────────────────── HTTP ─────────────────────────────
+
+MIME = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+    ".json": "application/json; charset=utf-8",
+    ".woff2": "font/woff2",
+}
+
+
+def _entry_from_request(body):
+    """从请求体里取出「来源 + 可选的版本/安装包指定」。"""
+    raw = str(body.get("source") or "").strip()
+    if not raw:
+        raise ValueError("请填写仓库地址（owner/name 或完整链接），或 fpk 直链")
+    entry = {"repo": raw} if ("/" in raw and not raw.startswith("http")) else {"url": raw}
+    if raw.startswith("http") and "github.com" not in raw:
+        entry = {"url": raw}
+    tag = str(body.get("tag") or "").strip()
+    asset = str(body.get("asset") or "").strip()
+    if tag:
+        entry["tag"] = tag
+    if asset:
+        entry["asset"] = asset
+    src = normalize_source(entry)
+    if not src["repo"] and not src["url"]:
+        raise ValueError("看起来不是仓库地址，也不是 http(s) 直链")
+    return raw, src, entry
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "FPKUpdate/1.0"
+    protocol_version = "HTTP/1.1"
+
+    # ── 小工具 ──
+    def _send(self, code, body=b"", ctype="application/json; charset=utf-8", extra=None):
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        # 本应用会被 fnOS 桌面小窗 iframe 嵌入，且可能经反代/自有域名访问，
+        # 因此不做父页面白名单（与自建 fpk 的既定口径一致）。
+        self.send_header("Content-Security-Policy",
+                         "default-src 'self'; img-src 'self' data:; "
+                         "style-src 'self' 'unsafe-inline'; script-src 'self'; "
+                         "frame-ancestors *")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _json(self, obj, code=200, extra=None):
+        self._send(code, json.dumps(obj, ensure_ascii=False), extra=extra)
+
+    def _err(self, code, msg):
+        self._json({"ok": False, "error": msg}, code=code)
+
+    def _same_origin_ok(self):
+        """POST 必须带自定义头。本应用没有登录，这道检查挡的是「别的网站
+        让浏览器替我们发请求」—— 跨站请求带不上自定义头（且我们不发 CORS 头）。"""
+        return self.headers.get("X-Requested-With") == "fpk-update"
+
+    def _read_body(self):
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return {}
+        if n <= 0 or n > 1 << 20:
+            return {}
+        try:
+            return json.loads(self.rfile.read(n).decode("utf-8"))
+        except ValueError:
+            return {}
+
+    # ── 路由 ──
+    def do_HEAD(self):
+        self.do_GET()
+
+    def do_GET(self):
+        try:
+            self._route_get()
+        except BrokenPipeError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            log("GET %s 出错: %s" % (self.path, exc))
+            log(traceback.format_exc())
+            try:
+                self._err(500, "服务内部错误")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def do_POST(self):
+        try:
+            self._route_post()
+        except BrokenPipeError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            log("POST %s 出错: %s" % (self.path, exc))
+            log(traceback.format_exc())
+            try:
+                self._err(500, "服务内部错误")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _route_get(self):
+        path = urlparse(self.path).path
+
+        if path == "/api/health":
+            return self._json({"ok": True, "time": datetime.now(CST).isoformat(timespec="seconds")})
+
+        if path == "/api/icon/":
+            return self._err(400, "缺少应用名")
+
+        if path.startswith("/api/icon/"):
+            appname = path[len("/api/icon/"):].strip("/")
+            if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", appname):
+                return self._err(400, "应用名非法")
+            # 只允许白名单内的应用，避免变成任意文件读取
+            if appname not in {a["appname"] for a in load_whitelist()}:
+                return self._err(404, "不在白名单内")
+            p = icon_path(appname)
+            if not p:
+                return self._err(404, "没有图标")
+            with open(p, "rb") as f:
+                data = f.read()
+            return self._send(200, data, ctype="image/png",
+                              extra={"Cache-Control": "no-cache"})
+
+        if path == "/api/state":
+            st = cached_state()
+            tasks = list_tasks()
+            # 服务重启后残留的 running 状态 → 归为未知，别让界面永远转圈
+            for t in tasks:
+                if t.get("status") == "running" and not _worker_alive():
+                    update_task(t["id"], status="failed", stage="error",
+                                message="上一次任务在服务重启时中断，请重试")
+            tasks = list_tasks()
+            return self._json({
+                "ok": True,
+                "last_check": st.get("at"),
+                "last_trigger": st.get("trigger"),
+                "apps": st.get("apps") or [],
+                "tasks": tasks,
+                "job": current_task() or _last_task(tasks),
+                "check_interval_min": CHECK_INTERVAL_MIN,
+                "busy": bool(current_task()),
+                "whitelist_file": APPS_USER,
+                "has_token": bool(gh_token()),
+                "token_hint": token_hint(),
+                "token_file": GH_TOKEN_FILE,
+                "settings": load_settings(),
+                "default_download_dir": DEFAULT_DOWNLOAD_DIR,
+                "mirror_presets": MIRROR_PRESETS,
+                "whitelist": load_whitelist(),
+                "device_arch": device_arch(),
+                "packages": package_summary(),
+            })
+
+        if path == "/api/packages":
+            items = list_packages()
+            fgn = foreign_packages()
+            return self._json({"ok": True, "dir": download_dir(), "items": items,
+                               "count": len(items),
+                               "size": sum(i["size"] for i in items),
+                               "foreign": fgn,
+                               "foreign_count": len(fgn),
+                               "foreign_size": sum(i["size"] for i in fgn)})
+
+        if path == "/api/tasks":
+            return self._json({"ok": True, "tasks": list_tasks(),
+                               "busy": bool(current_task())})
+
+        if path == "/api/log":
+            try:
+                n = int(parse_qs(urlparse(self.path).query).get("lines", ["120"])[0])
+            except ValueError:
+                n = 120
+            n = max(10, min(500, n))
+            lp = os.path.join(VAR_DIR, "fpk-update.log")
+            lines = []
+            try:
+                with open(lp, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()[-n:]
+            except OSError:
+                pass
+            return self._json({"ok": True, "lines": [l.rstrip("\n") for l in lines]})
+
+        # 静态资源
+        if path == "/":
+            path = "/index.html"
+        rel = path.lstrip("/")
+        if ".." in rel.split("/"):
+            return self._err(400, "非法路径")
+        full = os.path.join(STATIC_DIR, rel)
+        if not os.path.isfile(full):
+            return self._err(404, "找不到资源")
+        ext = os.path.splitext(full)[1].lower()
+        with open(full, "rb") as f:
+            data = f.read()
+        # 静态资源一律 no-cache：升级 fpk 后文件名不变（app.js/style.css），
+        # 不加这个头，浏览器/桌面小窗可能长时间用旧界面（实测风险）。
+        return self._send(200, data, ctype=MIME.get(ext, "application/octet-stream"),
+                          extra={"Cache-Control": "no-cache"})
+
+    def _route_post(self):
+        path = urlparse(self.path).path
+        if not self._same_origin_ok():
+            return self._err(403, "缺少必要请求头")
+
+        if path == "/api/check":
+            body = self._read_body()
+            # 节流：10 秒内重复点「检查更新」直接返回上次结果，不再打 GitHub。
+            # 理由：本应用没有登录，多设备/误触/页面刷新都可能连点，而匿名额度只有
+            # 60 次/小时且按出口 IP 共享 —— 白白烧掉额度会让检测真的失败。
+            st0 = cached_state()
+            if not body.get("force") and st0.get("at"):
+                try:
+                    last = datetime.fromisoformat(st0["at"])
+                    if (datetime.now(CST) - last).total_seconds() < 10:
+                        log("检查节流：10 秒内刚查过，直接返回上次结果")
+                        return self._json({"ok": True, "apps": st0.get("apps") or [],
+                                           "last_check": st0.get("at"),
+                                           "throttled": True})
+                except ValueError:
+                    pass
+            results = run_check(trigger="manual")
+            return self._json({"ok": True, "apps": results,
+                               "last_check": cached_state().get("at")})
+
+        if path in ("/api/download", "/api/install", "/api/update"):
+            body = self._read_body()
+            appname = str(body.get("appname") or "")
+            allowed = {a["appname"] for a in load_whitelist()}
+            if appname not in allowed:
+                return self._err(400, "该应用不在列表里")
+            action = path.rsplit("/", 1)[1]
+            try:
+                tid = enqueue(appname, action)
+            except ValueError as exc:
+                return self._err(400, str(exc))
+            return self._json({"ok": True, "task": tid, "message": "已加入队列"})
+
+        if path == "/api/all":
+            # 批量动作（对标手机应用商店的「全部更新」）。
+            # 只对「确实该做」的应用排队：没更新可做的、有错的一律跳过并如实回报。
+            body = self._read_body()
+            action = str(body.get("action") or "update")
+            if action not in ("download", "update"):
+                return self._err(400, "批量只支持 download / update")
+            results = cached_state().get("apps") or []
+            if not results:
+                return self._err(409, "还没有检测结果，请先点「检查更新」")
+            queued, skipped = [], []
+            for r in results:
+                name = r.get("appname")
+                if not name:
+                    continue
+                if action == "update":
+                    ok = bool(r.get("update_available")) and not r.get("error")
+                else:
+                    dl = r.get("downloaded") or {}
+                    same = norm_version(dl.get("version") or "") == norm_version(r.get("latest") or "")
+                    ok = bool(r.get("latest")) and not r.get("error") and not (dl.get("complete") and same)
+                if not ok:
+                    skipped.append(name)
+                    continue
+                try:
+                    enqueue(name, action)
+                    queued.append(name)
+                except Exception as exc:  # noqa: BLE001
+                    skipped.append("%s（%s）" % (name, exc))
+            log("[批量] %s：排队 %d 个（%s），跳过 %d 个"
+                % (action, len(queued), ",".join(queued) or "-", len(skipped)))
+            return self._json({"ok": True, "action": action,
+                               "queued": queued, "skipped": skipped})
+
+        if path == "/api/tasks/clear":
+            return self._json({"ok": True, "tasks": clear_finished_tasks()})
+
+        if path == "/api/clean":
+            # 一键清理安装包。**只清本应用自己下载过的**（台账）。
+            # `dry` 只复盘不删（界面在确认前先取一次清单）。
+            body = self._read_body()
+            items = list_packages()
+            fgn = foreign_packages()
+            extra = {"foreign_count": len(fgn),
+                     "foreign_size": sum(i["size"] for i in fgn),
+                     "foreign": [i["name"] for i in fgn]}
+            if not items:
+                return self._json({"ok": True, "dry": bool(body.get("dry")),
+                                   "items": [], "count": 0, "size": 0,
+                                   "deleted": [], "failed": [], "freed": 0, **extra})
+            if body.get("dry"):
+                return self._json({"ok": True, "dry": True, "items": items,
+                                   "count": len(items),
+                                   "size": sum(i["size"] for i in items), **extra})
+            res = clean_packages()
+            log("[清理] 删除 %d 个安装包（%s），释放 %s；未删 %d 个"
+                % (len(res["deleted"]), ",".join(res["deleted"]) or "-",
+                   _human(res["freed"]), len(res["failed"])))
+            return self._json({"ok": True, "dry": False, "count": len(res["deleted"]),
+                               "size": sum(i["size"] for i in items),
+                               "deleted": res["deleted"],
+                               "failed": res["failed"], "freed": res["freed"], **extra})
+
+        if path == "/api/job/dismiss":
+            return self._json({"ok": True, "tasks": clear_finished_tasks()})
+
+        if path == "/api/settings":
+            body = self._read_body()
+            new = {}
+            if "download_dir" in body:
+                ok, res = validate_download_dir(str(body.get("download_dir") or ""))
+                if not ok:
+                    return self._err(400, res)
+                new["download_dir"] = res
+            if "concurrency" in body:
+                try:
+                    conc = int(body.get("concurrency"))
+                except (TypeError, ValueError):
+                    return self._err(400, "并发数必须是 1–8 的整数")
+                if not 1 <= conc <= 8:
+                    return self._err(400, "并发数必须在 1–8 之间（1 = 单流不分段）")
+                new["concurrency"] = conc
+            if "mirror" in body:
+                mir = str(body.get("mirror") or "").strip()
+                if mir and not re.match(r"^https?://[^\s]+$", mir):
+                    return self._err(400, "加速镜像要填 http(s):// 开头的地址，留空 = 直连")
+                new["mirror"] = mir
+            if "auto_download" in body:
+                new["auto_download"] = bool(body.get("auto_download"))
+            if "auto_clean" in body:
+                new["auto_clean"] = bool(body.get("auto_clean"))
+            if "theme" in body:
+                th = str(body.get("theme") or "").strip().lower()
+                if th not in THEME_CHOICES:
+                    return self._err(400, "主题只能是 auto / light / dark")
+                new["theme"] = th
+            if new:
+                save_settings(new)
+                log("设置已更新：%s" % new)
+            return self._json({"ok": True, "settings": load_settings()})
+
+        if path == "/api/apps/options":
+            body = self._read_body()
+            try:
+                raw, src, entry = _entry_from_request(body)
+                opts = list_options(entry)
+            except ValueError as exc:
+                return self._err(400, str(exc))
+            except urllib.error.HTTPError as exc:
+                return self._err(400, _gh_error_message(exc))
+            except Exception as exc:  # noqa: BLE001
+                return self._err(400, "无法列出可选版本：%s" % exc)
+            opts["ok"] = True
+            opts["source"] = src["repo"] or src["url"]
+            return self._json(opts)
+
+        if path == "/api/apps/preview":
+            body = self._read_body()
+            try:
+                raw, src, entry = _entry_from_request(body)
+                rel = resolve_source(entry)
+            except ValueError as exc:
+                return self._err(400, str(exc))
+            except urllib.error.HTTPError as exc:
+                return self._err(400, _gh_error_message(exc))
+            except Exception as exc:  # noqa: BLE001
+                return self._err(400, "无法识别：%s" % exc)
+            appname = rel["appname"]
+            installed = installed_version(appname)
+            return self._json({
+                "ok": True,
+                "appname": appname,
+                "display_name": rel.get("display_name") or installed_display(appname) or appname,
+                "version": rel["version"],
+                "version_source": rel.get("version_source"),
+                "platform": rel.get("platform"),
+                "tag": rel.get("tag"),
+                "asset_name": rel.get("asset_name"),
+                "size": rel.get("size"),
+                "has_sha256": bool(rel.get("sha256")),
+                "installed": bool(installed),
+                "installed_version": installed,
+                "update_available": bool(installed) and is_newer(rel["version"], installed),
+                "source": (rel.get("source_kind") == "repo" and src["repo"]) or src["url"],
+            })
+
+        if path == "/api/apps/add":
+            body = self._read_body()
+            try:
+                raw, src, entry = _entry_from_request(body)
+                rel = resolve_source(entry)
+            except ValueError as exc:
+                return self._err(400, str(exc))
+            except urllib.error.HTTPError as exc:
+                return self._err(400, _gh_error_message(exc))
+            except Exception as exc:  # noqa: BLE001
+                return self._err(400, "无法识别：%s" % exc)
+            appname = rel["appname"]
+            # 只能管理「本机已安装」的应用 —— 硬边界
+            if not installed_version(appname):
+                return self._err(400, "该安装包对应应用 %s，但本机没有安装它，无法管理"
+                                      "（本工具只更新已安装的应用）" % appname)
+            with _lock:
+                doc = _whitelist_doc()
+                for item in doc["apps"]:
+                    if not isinstance(item, dict):
+                        continue
+                    s = normalize_source(item)
+                    if (s["repo"] or s["url"]) == (src["repo"] or src["url"]):
+                        return self._err(409, "这个来源已经在列表里了（可用「换版本」改它的版本）")
+                new_item = {"appname": appname}
+                if src["repo"]:
+                    new_item["repo"] = src["repo"]
+                else:
+                    new_item["url"] = src["url"]
+                new_item["display"] = rel.get("display_name") or appname
+                if src["tag"]:
+                    new_item["tag"] = src["tag"]
+                if src["asset"]:
+                    new_item["asset"] = src["asset"]
+                doc["apps"].append(new_item)
+                save_whitelist(doc)
+            log("新增被管理应用：%s（来源 %s，版本 %s，包 %s）"
+                % (appname, src["repo"] or src["url"], rel["version"], rel["asset_name"]))
+            return self._json({"ok": True, "appname": appname, "apps": load_whitelist()})
+
+        if path == "/api/apps/pin":
+            # 给已有条目换版本 / 换安装包（不改来源）
+            body = self._read_body()
+            key = str(body.get("source") or "").strip()
+            tag = str(body.get("tag") or "").strip()
+            asset = str(body.get("asset") or "").strip()
+            if not key:
+                return self._err(400, "缺少 source")
+            with _lock:
+                doc = _whitelist_doc()
+                hit = None
+                for item in doc["apps"]:
+                    if not isinstance(item, dict):
+                        continue
+                    s = normalize_source(item)
+                    if (s["repo"] or s["url"]) == key or (s["appname"] and s["appname"] == key):
+                        hit = item
+                        break
+                if hit is None:
+                    return self._err(404, "列表里没有这个来源")
+                if tag:
+                    hit["tag"] = tag
+                else:
+                    hit.pop("tag", None)
+                if asset:
+                    hit["asset"] = asset
+                else:
+                    hit.pop("asset", None)
+                save_whitelist(doc)
+            log("已改钉版本：%s -> tag=%s asset=%s" % (key, tag or "（自动最新）", asset or "（自动挑）"))
+            return self._json({"ok": True, "apps": load_whitelist()})
+
+
+        if path == "/api/apps/remove":
+            body = self._read_body()
+            key = str(body.get("source") or "").strip()
+            appname = str(body.get("appname") or "").strip()
+            with _lock:
+                doc = _whitelist_doc()
+                before = len(doc["apps"])
+                kept = []
+                removed = None
+                for item in doc["apps"]:
+                    if not isinstance(item, dict):
+                        continue
+                    s = normalize_source(item)
+                    ident = s["repo"] or s["url"]
+                    if (key and ident == key) or (appname and s["appname"] == appname):
+                        removed = ident or s["appname"]
+                        continue
+                    kept.append(item)
+                if removed is None:
+                    return self._err(404, "列表里没有这一条")
+                doc["apps"] = kept
+                save_whitelist(doc)
+            log("移除被管理应用：%s（原 %d 条 → %d 条）" % (removed, before, len(kept)))
+            return self._json({"ok": True, "apps": load_whitelist()})
+
+        if path == "/api/apps/reset":
+            with _lock:
+                save_whitelist({"apps": (load_json(APPS_DEFAULT) or {}).get("apps", [])})
+            return self._json({"ok": True, "apps": load_whitelist()})
+
+        if path == "/api/token":
+            body = self._read_body()
+            tok = str(body.get("token") or "")
+            if tok and not re.match(r"^[A-Za-z0-9_\-]{20,255}$", tok):
+                return self._err(400, "令牌格式看起来不对（应为 20–255 位字母数字，"
+                                      "github_pat_… 或 ghp_… 开头）")
+            write_token(tok)
+            log("GitHub 访问令牌已%s" % ("更新" if tok else "清除"))
+            return self._json({"ok": True, "has_token": bool(tok), "token_hint": token_hint()})
+
+        return self._err(404, "未知接口")
+
+    def log_message(self, fmt, *args):
+        # 默认会把每条请求写进 stderr，太吵；只留我们自己的结构化日志
+        pass
+
+
+# ───────────────────────────── 后台检测线程 ─────────────────────────────
+
+def checker_loop():
+    time.sleep(8)  # 等服务先起来
+    while True:
+        try:
+            run_check(trigger="auto")
+        except Exception:  # noqa: BLE001
+            log("自动检测出错：")
+            log(traceback.format_exc())
+        time.sleep(max(300, CHECK_INTERVAL_MIN * 60))
+
+
+def main():
+    global _worker_thread
+    for d in (VAR_DIR, HOME_DIR, download_dir()):
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError as exc:
+            log("创建目录 %s 失败: %s" % (d, exc))
+    log("=" * 60)
+    log("FPK更新 启动：%s:%s  static=%s  var=%s" % (HOST, PORT, STATIC_DIR, VAR_DIR))
+    if not os.path.exists(DAEMON_SOCKET):
+        log("⚠️ 找不到应用中心 socket %s —— 检测可用，但升级会失败" % DAEMON_SOCKET)
+    st = load_settings()
+    log("下载目录=%s  分段并发=%d  加速镜像=%s"
+        % (st["download_dir"], st["concurrency"], st["mirror"] or "直连"))
+    _worker_thread = threading.Thread(target=worker_loop, name="dl-worker", daemon=True)
+    _worker_thread.start()
+    threading.Thread(target=checker_loop, name="checker", daemon=True).start()
+    httpd = ThreadingHTTPServer((HOST, PORT), Handler)
+    httpd.daemon_threads = True
+    log("已就绪，监听 %s:%s" % (HOST, PORT))
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+        log("已停止")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:  # noqa: BLE001
+        log("致命错误：")
+        log(traceback.format_exc())
+        sys.exit(1)

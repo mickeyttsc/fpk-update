@@ -1,0 +1,11 @@
+[
+  {
+    "stepTitle": "升级说明",
+    "items": [
+      { "type": "tips", "helpText": "升级会保留你的访问密码和应用白名单（apps.json），无需重新设置。" },
+      { "type": "tips", "helpText": "本步骤只在升级时出现，不带密码输入框 —— 已设过密码的保持不变。" },
+      { "type": "tips", "helpText": "若从很旧的版本升上来、此前没有密码文件：升级后会自动使用默认密码 password，请先用它登录再尽快修改。" },
+      { "type": "tips", "helpText": "升级完成后建议浏览器 Ctrl+F5 强刷一次页面。" }
+    ]
+  }
+]

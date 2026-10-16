@@ -1,0 +1,19 @@
+# 构建产物
+dist/
+dist-*/
+*.fpk
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 编辑器 / 系统
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# 本地临时
+*.log
+/tmp-*

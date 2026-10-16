@@ -1,0 +1,30 @@
+{
+  "_说明": "被管理的应用。每条只要给出『来源』即可 —— appname / 显示名 / 版本都会自动识别（从 fpk 自身的 manifest 读，所以任何仓库都能用，不需要改目标仓库，也不需要改本安装包）。改完刷新网页即可生效，不用重启；也可以直接在网页「设置 → 被管理的应用」里增删。",
+  "_可用字段": {
+    "repo": "GitHub 仓库 owner/name（也可直接贴完整 https://github.com/owner/name 链接）",
+    "url": "fpk 直链（非 GitHub 也能用，但直链没有 sha256 摘要，出于安全不会下载/安装）",
+    "appname": "可选。不填则自动识别；填了就必须与安装包内的 appname 一致，否则报错",
+    "display": "可选。界面显示名，不填则用安装包里的 display_name",
+    "tag": "可选。钉住某个 Release 的 tag（例如 v1.2.3），不填则自动挑最新的正式版",
+    "asset": "可选。同一个 Release 有多个 .fpk 附件时的通配符，例如 *x86*.fpk",
+    "allow_prerelease": "可选。true 时也接受预发布版 / 滚动 tag（如 latest）",
+    "note": "可选。卡片上的一句说明"
+  },
+  "apps": [
+    {
+      "appname": "hermes-studio",
+      "display": "Ekko Studio",
+      "repo": "mickeyttsc/ekko-studio-fpk"
+    },
+    {
+      "appname": "cliproxyapi",
+      "display": "CLIProxyAPI",
+      "repo": "mickeyttsc/cliproxyapi-fpk"
+    },
+    {
+      "appname": "wildwork",
+      "display": "Wild Work",
+      "repo": "mickeyttsc/wild-work-fpk"
+    }
+  ]
+}

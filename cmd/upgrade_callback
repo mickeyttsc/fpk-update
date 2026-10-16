@@ -1,0 +1,19 @@
+#!/bin/bash
+# 升级后：确保数据目录结构完整（新版本可能新增目录），不覆盖任何用户文件。
+set -u
+_resolve() {
+    local appname="${TRIM_APPNAME:-fpk-update}" vol="" v appdir=""
+    appdir="$(readlink -f "/var/apps/${appname}/target" 2>/dev/null || true)"
+    case "$appdir" in /vol[0-9]*/@appcenter/*) vol="$(printf '%s' "$appdir" | cut -d/ -f2)" ;; esac
+    if [ -z "$vol" ]; then
+        for v in /vol[0-9]*; do
+            [ -d "${v}/@appcenter/${appname}" ] && vol="${v#/}" && break
+        done
+    fi
+    [ -z "$vol" ] && vol="vol2"
+    : "${TRIM_PKGHOME:=/${vol}/@apphome/${appname}}"
+    : "${TRIM_PKGVAR:=/${vol}/@appdata/${appname}}"
+}
+_resolve
+mkdir -p "$TRIM_PKGHOME" "$TRIM_PKGVAR/downloads" 2>/dev/null
+exit 0

@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>FPK更新</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+<!-- 放在 head + defer：DOM 一解析完就先套主题，避免暗色模式下先闪一下白底 -->
+<script src="/app.js" defer></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <!-- 页头标志：直接用生成器产出的图标（与 ICON.PNG / favicon 同一份文件），
+         不在这里内联手写一份 —— 内联的那份迟早会和真正的图标长得不一样 -->
+    <img class="brand-mark sm" src="/favicon.svg" alt="" width="34" height="34">
+    <div class="brand-text">
+      <strong>FPK更新</strong>
+      <span class="muted" id="last-check">尚未检查</span>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <button class="btn ghost" id="check-btn" title="立即检查所有应用的最新版本">
+      <svg viewBox="0 0 24 24" class="ico" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>检查更新</span>
+    </button>
+    <button class="btn ghost" id="clean-btn" title="清理已下载的安装包" aria-label="清理安装包">
+      <svg viewBox="0 0 24 24" class="ico" aria-hidden="true" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v5M14 11v5"/>
+      </svg>
+      <span>清理</span>
+    </button>
+    <button class="btn ghost" id="settings-btn" title="设置">
+      <svg viewBox="0 0 24 24" class="ico" aria-hidden="true" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+      <span>设置</span>
+    </button>
+  </div>
+</header>
+
+<div class="notice hidden" id="notice"></div>
+
+<!-- 顶部汇总条（对标手机应用商店）：有几个可更新 + 一键全部更新 -->
+<div class="summary hidden" id="summary">
+  <span class="s-txt" id="summary-txt">—</span>
+  <div class="s-actions">
+    <button class="btn ghost sm" id="all-download">全部下载</button>
+    <button class="btn primary sm" id="all-update">全部更新</button>
+  </div>
+</div>
+
+<main class="cards" id="cards"></main>
+
+<footer class="foot">
+  <span class="muted">升级走飞牛应用中心官方通道，保数据、不重装。被更新的应用会短暂重启。</span>
+</footer>
+
+<!-- 设置：分页 -->
+<div class="modal hidden" id="settings-modal">
+  <div class="modal-card wide">
+    <div class="modal-head">
+      <h3>设置</h3>
+      <button class="btn ghost icon-only" id="settings-close" aria-label="关闭">
+        <svg viewBox="0 0 24 24" class="ico" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+
+    <div class="tabs" id="settings-tabs" role="tablist">
+      <button class="tab on" data-tab="apps" role="tab">应用</button>
+      <button class="tab" data-tab="dl" role="tab">下载</button>
+      <button class="tab" data-tab="look" role="tab">外观</button>
+      <button class="tab" data-tab="misc" role="tab">其它</button>
+    </div>
+
+    <div class="panes">
+      <!-- ── 应用 ── -->
+      <section class="pane on" data-pane="apps">
+        <p class="set-hint">
+          只有列在这里的应用会被显示和操作。加一个应用只要填它的 <b>GitHub 仓库</b>
+          （<code>owner/name</code> 或完整链接）—— 应用名、显示名、版本都会自动识别
+          （读 fpk 自身的 manifest，所以任何仓库都能用，不需要改仓库，也不需要重装本应用）。
+          也可以填 <b>fpk 直链</b>。
+        </p>
+        <div class="applist" id="apps-list"></div>
+        <div class="row">
+          <input type="text" id="app-add-input" placeholder="owner/name 或 https://github.com/owner/name"
+                 spellcheck="false" autocomplete="off">
+          <button class="btn primary" id="app-add-btn">获取版本</button>
+        </div>
+
+        <div class="picker hidden" id="app-picker">
+          <div class="row">
+            <label class="selwrap">
+              <span>版本</span>
+              <select id="ver-select"></select>
+            </label>
+          </div>
+          <div class="row">
+            <label class="selwrap">
+              <span>安装包</span>
+              <select id="asset-select"></select>
+            </label>
+          </div>
+          <pre class="log hidden" id="app-preview"></pre>
+          <div class="row">
+            <button class="btn ghost" id="app-preview-btn">预览</button>
+            <button class="btn primary" id="app-confirm-btn">添加</button>
+            <button class="btn ghost" id="app-picker-cancel">取消</button>
+          </div>
+        </div>
+
+        <div class="row">
+          <button class="btn ghost" id="apps-reset">恢复默认列表</button>
+        </div>
+      </section>
+
+      <!-- ── 下载 ── -->
+      <section class="pane" data-pane="dl">
+        <h4>自动下载</h4>
+        <label class="switch-row">
+          <input type="checkbox" id="auto-dl-input">
+          <span>检测到有新版本时<b>自动下载</b>安装包</span>
+        </label>
+        <p class="set-hint">
+          <b>只下载，不会自动安装</b> —— 装不装、什么时候装仍然由你点。
+          开了之后新版本的包会在后台悄悄下好，你只要在方便的时候点一下「安装」。
+        </p>
+
+        <h4>下载加速</h4>
+        <div class="row">
+          <label class="selwrap">
+            <span>分段并发</span>
+            <input type="number" id="conc-input" min="1" max="8" step="1" value="4">
+          </label>
+        </div>
+        <div class="row">
+          <label class="selwrap">
+            <span>加速镜像</span>
+            <select id="mirror-select"></select>
+          </label>
+        </div>
+        <div class="row hidden" id="mirror-custom">
+          <input type="text" id="mirror-input" placeholder="https://gh-proxy.com"
+                 spellcheck="false" autocomplete="off">
+        </div>
+        <div class="row">
+          <button class="btn primary" id="speed-save">保存</button>
+        </div>
+        <p class="set-hint">
+          大文件按段并发下载（<b>1 = 不分段</b>，4 段是默认）。并发只影响速度，不影响结果：
+          下完一律过 sha256 校验，对不上直接丢弃。<br>
+          到 GitHub 慢可以选加速镜像 —— 走镜像同样要过 sha256，镜像只能提速、改不了内容
+          （镜像挂了会自动回落直连）。
+        </p>
+
+        <h4>安装包下载目录</h4>
+        <p class="set-hint" id="dl-state">—</p>
+        <div class="row">
+          <input type="text" id="dl-input" placeholder="/vol2/backups/fpk" spellcheck="false">
+          <button class="btn primary" id="dl-save">保存</button>
+        </div>
+        <div class="row">
+          <button class="btn ghost" id="dl-reset">恢复默认</button>
+        </div>
+        <p class="set-hint">
+          「下载」与「下载并更新」会把 fpk 存到这里（校验 sha256 后才使用；失败时保留作回滚包）。
+          必须是绝对路径，且不能放在应用安装目录（<code>@appcenter</code>）或别的应用的数据目录里。
+        </p>
+
+        <h4>安装包清理</h4>
+        <label class="switch-row">
+          <input type="checkbox" id="auto-clean-input">
+          <span>安装成功后<b>自动清理</b>刚装的那个安装包</span>
+        </label>
+        <p class="set-hint">
+          装成功了这个包就没用了，而它是刚下下来的、随时能从 Release 再取。
+          <b>只在核验通过后才删</b>（版本确实变了、应用目录还在）；失败或装完起不来的情况一律保留，
+          因为它此时是回滚包。
+        </p>
+        <p class="set-hint" id="pkg-state">可清理：—</p>
+        <div class="row">
+          <button class="btn primary" id="clean-now-btn">清理安装包</button>
+          <button class="btn ghost" id="clean-refresh">刷新</button>
+        </div>
+        <p class="set-hint">
+          <b>只清理本应用自己下载过的包</b>（下载完会记一笔台账，装完/清完就销账）。
+          下载目录里你自己归档、或别的脚本放进来的 fpk <b>一个都不会动</b> ——
+          那可能是你的回滚包。清理前会先列出清单让你确认。
+        </p>
+      </section>
+
+      <!-- ── 外观 ── -->
+      <section class="pane" data-pane="look">
+        <h4>主题</h4>
+        <div class="seg" id="theme-seg">
+          <button data-v="auto">跟随系统</button>
+          <button data-v="light">浅色</button>
+          <button data-v="dark">深色</button>
+        </div>
+        <p class="set-hint">
+          默认「跟随系统」—— 手机/电脑切到暗色，这里也跟着变。
+          也可以强制固定成浅色或深色。选择会记在本机，下次打开还是它。
+        </p>
+      </section>
+
+      <!-- ── 其它 ── -->
+      <section class="pane" data-pane="misc">
+        <h4>GitHub 访问令牌</h4>
+        <p class="set-hint" id="token-state">未设置</p>
+        <div class="row">
+          <input type="password" id="token-input" placeholder="粘贴令牌（只读即可，github_pat_… / ghp_…）"
+                 autocomplete="off" spellcheck="false">
+          <button class="btn primary" id="token-save">保存</button>
+        </div>
+        <p class="set-hint">
+          匿名访问 GitHub 的额度是 <b>60 次/小时且按出口 IP 共享</b>，实测很容易被限流，
+          导致「检查更新」失败。填一个令牌可提到 5000 次/小时。令牌只存在本机数据目录的
+          <code>github-token.txt</code>（权限 600），不会随应用包分发，页面只回显末四位。
+          留空保存 = 清除令牌。
+        </p>
+
+        <h4>后台任务</h4>
+        <p class="set-hint">
+          下载/安装都在后台队列里跑，<b>关掉页面也会继续</b>；重新打开能看到进度。
+          队列一次跑一个，避免几个大包互相抢带宽。
+        </p>
+        <div class="tasklist" id="task-list"></div>
+        <div class="row">
+          <button class="btn ghost" id="task-clear">清理已完成</button>
+        </div>
+
+        <h4>运行信息</h4>
+        <div class="kv"><span>列表文件</span><code id="wl-path">—</code></div>
+        <div class="kv"><span>自动检测</span><span class="muted" id="auto-note">—</span></div>
+        <div class="row">
+          <button class="btn ghost" id="log-btn">查看日志</button>
+        </div>
+        <pre class="log hidden" id="log-box"></pre>
+      </section>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toasts"></div>
+</body>
+</html>
