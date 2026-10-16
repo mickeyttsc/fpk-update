@@ -65,6 +65,8 @@ BREAKS = [
      "            results[i] = None"),
     ("Release 列表不缓存", "    if hit and now - hit[0] < GH_CACHE_TTL:",
      "    if False:"),
+    ("清理不再保留当前版本的包",
+     "        if it.get(\"current\") and not include_current:", "        if False:"),
     ("「已是最新就不下载」判定失效",
      "and not download_needed(it):", "and False:"),
     ("本地包改回只看台账（不比对内容）",

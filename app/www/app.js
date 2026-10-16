@@ -554,11 +554,13 @@ function render() {
   syncInput('conc-input', String(st.concurrency || 4));
   $('auto-dl-input').checked = !!st.auto_download;
   $('auto-clean-input').checked = !!st.auto_clean;
+  $('keep-current-input').checked = st.clean_keep_current !== false;
   const pk = s.packages || {};
   const fg = pk.foreign_count || 0;
   $('pkg-state').textContent = (pk.count
     ? ('可清理：' + pk.count + ' 个 · ' + fmtSize(pk.size))
     : '可清理：无（本应用下载的包，装完会自动清掉）')
+    + (pk.keep_count ? ('　·　保留当前版本 ' + pk.keep_count + ' 个（' + fmtSize(pk.keep_size) + '）') : '')
     + (fg ? ('　·　另有 ' + fg + ' 个不是本应用下载的（' + fmtSize(pk.foreign_size)
       + '），不会动') : '')
     + ((pk.parts_count) ? ('　·　下载残留 ' + pk.parts_count + ' 个（'
@@ -641,6 +643,8 @@ async function doClean() {
     rows: [items.map((i) => [i.name, fmtSize(i.size)])
       .concat((r.parts || []).slice(0, 8).map((n) => [n, '下载残留']))],
     notes: [
+      (r.keep_count ? ('会保留 ' + r.keep_count + ' 个当前版本的包（回滚/修复用，'
+        + fmtSize(r.keep_size) + '）。要连它们一起清，可在设置里关掉「清理时保留当前版本」。') : ''),
       '位置：' + where,
       fgn ? ('同目录里另有 ' + fgn + ' 个不是本应用下载的安装包（'
         + fmtSize(r.foreign_size) + '），不会动。') : '',
@@ -659,6 +663,7 @@ async function doClean() {
     let msg = '已清理 ' + (n + np) + ' 项，释放 '
       + fmtSize((d.freed || 0) + (d.parts_freed || 0));
     if (bad) msg += '；' + bad + ' 个没删掉（' + d.failed[0].reason + '）';
+    if ((d.kept || []).length) msg += '；保留当前版本 ' + d.kept.length + ' 个';
     toast(msg, bad ? '' : 'ok');
     await refresh();
   } catch (e) { toast(e.message, 'err'); }
@@ -1074,6 +1079,20 @@ $('clean-refresh').addEventListener('click', async () => {
   await refresh();
   toast('已刷新', '');
 });
+$('keep-current-input').addEventListener('change', async (ev) => {
+  const v = ev.currentTarget.checked;
+  try {
+    const r = await api('/api/settings', { method: 'POST', body: { clean_keep_current: v } });
+    toast(r.settings.clean_keep_current
+      ? '清理时会保留当前版本的包（回滚/修复用）'
+      : '清理时会连当前版本的包一起清掉', 'ok');
+    await refresh();
+  } catch (e) {
+    ev.currentTarget.checked = !v;
+    toast(e.message, 'err');
+  }
+});
+
 $('auto-clean-input').addEventListener('change', async (ev) => {
   const v = ev.currentTarget.checked;
   try {

@@ -493,6 +493,34 @@ def main():
     chk(s.download_needed(dict(latest_ok, installed="9.9.9")) is True,
         "钉了旧版本（比最新还旧的目标）→ 要下载（回滚是正经用途）")
 
+    # ── 6g. 清理默认保留「当前版本」的包 ──
+    print("▸ 清理默认保留当前版本的包（实测被一键清掉过 383MB 的回滚包）")
+    dl3 = tempfile.mkdtemp(prefix="fpku-keep-")
+    s.save_settings({"download_dir": dl3, "clean_keep_current": True})
+    _sh3 = os.path.join(dl3, "cur.fpk")
+    _old3 = os.path.join(dl3, "old.fpk")
+    for _p in (_sh3, _old3):
+        with open(_p, "wb") as f:
+            f.write(b"z" * 64)
+    s.record_package(_sh3, "installed-one", "9.9", 64, "a" * 64)     # 当前装的就是 9.9
+    s.record_package(_old3, "installed-one", "9.8", 64, "b" * 64)    # 旧版本
+    s.installed_version = lambda n: "9.9"
+    items = {i["name"]: i for i in s.list_packages()}
+    chk(items["cur.fpk"]["current"] is True, "标出「这是当前版本的包」", items["cur.fpk"])
+    summary = s.package_summary()
+    chk(summary["keep_count"] == 1 and summary["count"] == 1,
+        "汇总：可清 1 个（旧版本）、保留 1 个（当前版本）",
+        {k: summary[k] for k in ("count", "keep_count")})
+    res = s.clean_packages()
+    chk(res["deleted"] == ["old.fpk"], "默认只删旧版本", res["deleted"])
+    chk(res["kept"] == ["cur.fpk"] and os.path.isfile(_sh3), "当前版本的包被保留（回滚/修复用）", res["kept"])
+    res2 = s.clean_packages(include_current=True)
+    chk(res2["deleted"] == ["cur.fpk"] and not os.path.isfile(_sh3),
+        "显式要求时可连当前版本一起清（这是用户的明确选择）", res2["deleted"])
+    _sh4 = _sh3 + ".x"
+    import shutil as _sh4mod
+    _sh4mod.rmtree(dl3, ignore_errors=True)
+
     # ── 7. 自愈必须真的接在启动流程里（只定义不调用等于没修）──
     print("▸ 启动流程接线")
     import ast

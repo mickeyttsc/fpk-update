@@ -2133,9 +2133,15 @@ def load_settings():
     # 装完自动清理安装包（默认开）：装成功了这个包就没用了，而它是刚下下来的、
     # 随时能从 Release 再取。失败/未核验通过时绝不删（保留作回滚包）。
     auto_clean = data.get("auto_clean", True)
+    # 清理时是否连「当前版本」的安装包一起清（默认**保留**）。
+    # 为什么默认保留：当前版本的包就是回滚/修复用的那一份，实测用户的归档目录被
+    # 「一键清理」一次删掉 6 个包共 383MB（都是当前版本），要回滚就只能重新下载。
+    # 旧版本 + 下载残留照清，不占用「清不掉」的借口。
+    keep_current = data.get("clean_keep_current", True)
     return {"download_dir": dd, "concurrency": conc, "mirror": mir,
             "auto_download": bool(data.get("auto_download")),
             "auto_clean": bool(auto_clean),
+            "clean_keep_current": bool(keep_current),
             "theme": th}
 
 
@@ -2300,15 +2306,24 @@ def list_packages():
         if changed:
             _save_registry(reg)
     items = []
+    inst_cache = {}
     for p, meta in seen.items():
         try:
             sz = os.path.getsize(p)
         except OSError:
             continue
+        app = meta.get("appname") or ""
+        if app not in inst_cache:
+            inst_cache[app] = installed_version(app) or ""
+        inst = inst_cache[app]
+        # current=True：这份包就是「当前装着的那一版」——回滚/修复都用得上，默认不清
+        is_current = bool(inst) and bool(meta.get("version")) \
+            and norm_version(inst) == norm_version(meta.get("version"))
         items.append({"path": p, "name": os.path.basename(p),
-                      "appname": meta.get("appname") or "",
+                      "appname": app,
                       "version": meta.get("version") or "",
                       "size": sz, "at": meta.get("at") or "",
+                      "current": is_current,
                       "in_download_dir": os.path.dirname(p) == os.path.realpath(download_dir()),
                       "locked": _package_in_use(p)})
     items.sort(key=lambda x: (x["appname"], x["name"]))
@@ -2346,9 +2361,13 @@ def foreign_packages():
 
 def package_summary():
     items = list_packages()
+    keep = bool(load_settings().get("clean_keep_current", True))
+    stale = [i for i in items if not (keep and i.get("current"))]
+    kept = [i for i in items if keep and i.get("current")]
     fgn = foreign_packages()
     parts = [p for p in orphan_parts() if p["old_enough"]]
-    return {"count": len(items), "size": sum(i["size"] for i in items),
+    return {"count": len(stale), "size": sum(i["size"] for i in stale),
+            "keep_count": len(kept), "keep_size": sum(i["size"] for i in kept),
             "foreign_count": len(fgn), "foreign_size": sum(i["size"] for i in fgn),
             "parts_count": len(parts), "parts_size": sum(p["size"] for p in parts)}
 
@@ -2438,12 +2457,21 @@ def _safe_unlink(path):
     return True, ""
 
 
-def clean_packages():
-    """一键清理：删掉所有可清理的安装包 + 残留的下载中间文件。"""
-    deleted, failed, freed = [], [], 0
+def clean_packages(include_current=None):
+    """一键清理：删掉「用不上的」安装包 + 残留的下载中间文件。
+
+    `include_current` 缺省时读设置 `clean_keep_current`（默认 True）：
+      保留当前版本的包（回滚/修复要用），只清旧版本 + 残留。
+    """
+    if include_current is None:
+        include_current = not load_settings().get("clean_keep_current", True)
+    deleted, kept, failed, freed = [], [], [], 0
     for it in list_packages():
         if it["locked"]:
             failed.append({"name": it["name"], "reason": "正被进行中的任务使用"})
+            continue
+        if it.get("current") and not include_current:
+            kept.append(it["name"])
             continue
         ok, why = _safe_unlink(it["path"])
         if ok:
@@ -2461,7 +2489,7 @@ def clean_packages():
             parts_freed += it["size"]
         else:
             failed.append({"name": it["name"], "reason": why})
-    return {"deleted": deleted, "failed": failed, "freed": freed,
+    return {"deleted": deleted, "kept": kept, "failed": failed, "freed": freed,
             "parts": parts, "parts_freed": parts_freed}
 
 
@@ -2836,10 +2864,17 @@ class Handler(BaseHTTPRequestHandler):
             # 一键清理安装包 + 下载残留（中间分片）。**只清本应用自己下载过的**（台账）。
             # `dry` 只复盘不删（界面在确认前先取一次清单）。
             body = self._read_body()
-            items = list_packages()
+            include_current = bool(body.get("include_current")) if "include_current" in body \
+                else not load_settings().get("clean_keep_current", True)
+            all_items = list_packages()
+            items = [i for i in all_items if include_current or not i.get("current")]
+            kept_items = [i for i in all_items if not include_current and i.get("current")]
             fgn = foreign_packages()
             parts = [p for p in orphan_parts() if p["old_enough"]]
-            extra = {"foreign_count": len(fgn),
+            extra = {"keep_count": len(kept_items),
+                     "keep_size": sum(i["size"] for i in kept_items),
+                     "keep": [i["name"] for i in kept_items],
+                     "foreign_count": len(fgn),
                      "foreign_size": sum(i["size"] for i in fgn),
                      "foreign": [i["name"] for i in fgn],
                      "parts": [p["name"] for p in parts],
@@ -2853,15 +2888,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "dry": True, "items": items,
                                    "count": len(items),
                                    "size": sum(i["size"] for i in items), **extra})
-            res = clean_packages()
-            log("[清理] 删除 %d 个安装包（%s）与 %d 个下载残留，释放 %s；未删 %d 个"
+            res = clean_packages(include_current=include_current)
+            log("[清理] 删除 %d 个安装包（%s）与 %d 个下载残留，释放 %s；保留 %d 个当前版本；未删 %d 个"
                 % (len(res["deleted"]), ",".join(res["deleted"]) or "-",
                    len(res.get("parts") or []),
-                   _human(res["freed"] + res.get("parts_freed", 0)), len(res["failed"])))
+                   _human(res["freed"] + res.get("parts_freed", 0)),
+                   len(res.get("kept") or []), len(res["failed"])))
             return self._json({"ok": True, "dry": False,
                                "count": len(res["deleted"]),
                                "size": sum(i["size"] for i in items),
                                "deleted": res["deleted"],
+                               "kept": res.get("kept") or [],
                                "parts_deleted": res.get("parts") or [],
                                "parts_freed": res.get("parts_freed", 0),
                                "failed": res["failed"], "freed": res["freed"], **extra})
@@ -2894,6 +2931,8 @@ class Handler(BaseHTTPRequestHandler):
                 new["auto_download"] = bool(body.get("auto_download"))
             if "auto_clean" in body:
                 new["auto_clean"] = bool(body.get("auto_clean"))
+            if "clean_keep_current" in body:
+                new["clean_keep_current"] = bool(body.get("clean_keep_current"))
             if "theme" in body:
                 th = str(body.get("theme") or "").strip().lower()
                 if th not in THEME_CHOICES:

@@ -202,6 +202,10 @@
           <b>只在核验通过后才删</b>（版本确实变了、应用目录还在）；失败或装完起不来的情况一律保留，
           因为它此时是回滚包。
         </p>
+        <label class="switch-row">
+          <input type="checkbox" id="keep-current-input">
+          <span>清理时<b>保留当前版本的安装包</b>（回滚 / 修复用）</span>
+        </label>
         <p class="set-hint" id="pkg-state">可清理：—</p>
         <div class="row">
           <button class="btn primary" id="clean-now-btn">清理安装包</button>
