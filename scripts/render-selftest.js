@@ -317,6 +317,103 @@ try {
   bad++;
 }
 
+/* 任务进行中 / 排队中：进度、按钮禁用、同一件事只说一次 */
+console.log('────────────────────────────────────────');
+console.log('▸ 任务进行中（下载 42%）');
+try {
+  const app = {
+    appname: 'wildwork', display: 'Wild Work', has_icon: false,
+    repo: 'mickeyttsc/wild-work-fpk', installed: '2.8.0-1', latest: '2.8.1-1',
+    update_available: true, relation: 'newer', size: 8367502, published_at: null,
+    error: null, downloaded: null, notes: '', asset_name: 'wildwork-2.8.1-1.fpk',
+  };
+  sandbox.__setState({
+    apps: [app], last_check: null, has_token: true,
+    tasks: [{ id: 't1', appname: 'wildwork', action: 'download', status: 'running',
+      percent: 42, message: '分段下载中（4 段并发）…' }],
+    settings: { download_dir: '/vol2/x', concurrency: 4, mirror: '', auto_download: false,
+      auto_clean: true, theme: 'auto' },
+    packages: { count: 0, size: 0, foreign_count: 0, foreign_size: 0 },
+    whitelist: [], mirror_presets: [], default_download_dir: '/vol2/x',
+  });
+  const card = sandbox.__renderCard(app);
+  let bar = null, btns = [], texts = [];
+  const walk = (e) => {
+    if (String(e.className).includes('c-progress')) bar = e;
+    if (e.tagName === 'BUTTON') btns.push(e);
+    if (e.textContent) texts.push(String(e.textContent));
+    (e.children || []).forEach(walk);
+  };
+  walk(card);
+  const joined = texts.join(' | ');
+  const fillEl = bar && (bar.children[0] || {}).children && bar.children[0].children[0];
+  const width = fillEl && fillEl.style ? fillEl.style.width : null;
+  const okPct = width === '42%';
+  const okMsg = joined.includes('分段下载中');
+  const okPctOnce = (joined.match(/42%/g) || []).length === 1;
+  const allDisabled = btns.length === 3 && btns.every((b) => b.disabled === true);
+  console.log(`  ${okPct ? '✔' : '✘'} 进度条宽度 = ${width}（期望 42%）`);
+  console.log(`  ${okMsg ? '✔' : '✘'} 显示后端给的进度文案`);
+  console.log(`  ${okPctOnce ? '✔' : '✘'} 百分比只出现一次（不重复表达同一件事）`);
+  console.log(`  ${allDisabled ? '✔' : '✘'} 进行中该应用的三个按钮全部禁用（${btns.length} 个按钮）`);
+  if (!(okPct && okMsg && okPctOnce && allDisabled)) bad++;
+
+  console.log('▸ 排队中');
+  sandbox.__setState({
+    apps: [app], last_check: null, has_token: true,
+    tasks: [{ id: 't2', appname: 'wildwork', action: 'download', status: 'queued',
+      percent: null, message: '排队中…' }],
+    settings: { download_dir: '/vol2/x', concurrency: 4, mirror: '', auto_download: false,
+      auto_clean: true, theme: 'auto' },
+    packages: { count: 0, size: 0, foreign_count: 0, foreign_size: 0 },
+    whitelist: [], mirror_presets: [], default_download_dir: '/vol2/x',
+  });
+  const card2 = sandbox.__renderCard(app);
+  let bar2 = null, btns2 = [], t2 = [];
+  const walk2 = (e) => {
+    if (String(e.className).includes('c-progress')) bar2 = e;
+    if (e.tagName === 'BUTTON') btns2.push(e);
+    if (e.textContent) t2.push(String(e.textContent));
+    (e.children || []).forEach(walk2);
+  };
+  walk2(card2);
+  const indet = bar2 && bar2.children[0] && bar2.children[0].classList.contains('indet');
+  const okQueued = indet && t2.join(' | ').includes('排队中')
+    && btns2.length === 3 && btns2.every((b) => b.disabled === true);
+  console.log(`  ${okQueued ? '✔' : '✘'} 排队中也显示进度块（不确定态），按钮同样禁用`);
+  if (!okQueued) bad++;
+
+  console.log('▸ 任务结束（下载成功）');
+  sandbox.__setState({
+    apps: [app], last_check: null, has_token: true,
+    tasks: [{ id: 't3', appname: 'wildwork', action: 'download', status: 'ok',
+      percent: 100, message: '已下载 wildwork-2.8.1-1.fpk（8.0 MB，sha256 abcd…）',
+      finished_at: new Date().toISOString() }],
+    settings: { download_dir: '/vol2/x', concurrency: 4, mirror: '', auto_download: false,
+      auto_clean: true, theme: 'auto' },
+    packages: { count: 0, size: 0, foreign_count: 0, foreign_size: 0 },
+    whitelist: [], mirror_presets: [], default_download_dir: '/vol2/x',
+  });
+  const card3 = sandbox.__renderCard(app);
+  let btns3 = [], t3 = [];
+  const walk3 = (e) => {
+    if (e.tagName === 'BUTTON') btns3.push(e);
+    if (e.textContent) t3.push(String(e.textContent));
+    (e.children || []).forEach(walk3);
+  };
+  walk3(card3);
+  const dlBtn = btns3.find((b) => b.textContent === '下载');
+  const upBtn = btns3.find((b) => b.textContent === '下载并更新');
+  const reEnabled = dlBtn && dlBtn.disabled === false && upBtn && upBtn.disabled === false;
+  const showsResult = t3.join(' | ').includes('已下载');
+  console.log(`  ${reEnabled ? '✔' : '✘'} 任务结束后按钮恢复可点（不再被判为进行中）`);
+  console.log(`  ${showsResult ? '✔' : '✘'} 结果条显示后端给的结果文案`);
+  if (!(reEnabled && showsResult)) bad++;
+} catch (e) {
+  console.log('  ✘ 抛异常 -> ' + e.message);
+  bad++;
+}
+
 console.log('────────────────────────────────────────');
 console.log(bad === 0 ? '✅ 渲染自测通过（无异常、无重复）' : `✘ 有 ${bad} 处问题`);
 process.exit(bad === 0 ? 0 : 1);

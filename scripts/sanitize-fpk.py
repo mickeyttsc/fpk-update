@@ -91,9 +91,21 @@ def main():
     # 重打外层（固定顺序）
     out_buf = io.BytesIO()
     out_tar = tarfile.open(fileobj=out_buf, mode="w")
+    # 固定顺序，与 build-fpk.sh 里声明的顺序一致：
+    #   manifest → manifest.checksum → cmd → config → wizard → ICON.PNG → ICON_256.PNG → app.tgz
+    # 原来这里按字典序排（ICON.PNG 的 I=0x49 排在 cmd 的 c=0x63 之前），于是产物顺序
+    # 既不等于构建脚本声明、也不等于「先 cmd/config/wizard 后图标」的约定 —— 构建链
+    # 自相矛盾，而门禁只校验第一条是 manifest，其余顺序没人管。这里消掉这个缺口。
+    MEDIA = ("cmd", "config", "wizard", "ICON.PNG", "ICON_256.PNG")
+
+    def _rank(n):
+        head = n.split("/")[0]
+        return (MEDIA.index(head) if head in MEDIA else len(MEDIA), n)
+
     order = ["manifest", "manifest.checksum"]
-    order.extend(sorted(n for n in names
-                        if n not in ("manifest", "manifest.checksum", "app.tgz")))
+    order.extend(sorted((n for n in names
+                         if n not in ("manifest", "manifest.checksum", "app.tgz")),
+                        key=_rank))
     order.append("app.tgz")
     for name in order:
         if name == "app.tgz":

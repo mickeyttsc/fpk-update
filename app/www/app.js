@@ -136,10 +136,6 @@ function activeTasks() {
     (t) => t.status === 'running' || t.status === 'queued');
 }
 
-function anyActive() {
-  return activeTasks().length > 0;
-}
-
 /* 排序：正在动的 → 有新版本的 → 检查失败的 → 正常的；同级按名字 */
 function sortApps(list) {
   const rank = (a) => {
@@ -260,7 +256,7 @@ function versionRow(app) {
 /* 静态状态行：只在"本地有包"这类需要你知道的时候出现，且只有一条 */
 function staticState(app) {
   const d = app.downloaded;
-  if (!d) return null;
+  if (!d) return localUnknownRow(app);   // 有同名外来文件时，改为如实说明它是什么
   const differs = normVer(d.version) !== normVer(app.installed);
   let cls = 'ok';
   let text;
@@ -276,6 +272,20 @@ function staticState(app) {
   const row = el('div', 'c-state ' + cls);
   row.appendChild(el('span', 'c-state-ico', cls === 'warn' ? '!' : (cls === 'ok' ? '↓' : '·')));
   row.appendChild(el('span', '', text));
+  return row;
+}
+
+/* 本地有同名文件、但不是本应用为这一版下载的（不认领它）。
+   为什么单独说：下载目录往往同时是用户的归档目录，同名文件很可能属于旧版本 ——
+   不声不响地拿它去装，会出现「sha256 与 Release 不一致」这种把正常状态说成被篡改的报错。 */
+function localUnknownRow(app) {
+  const lu = app.local_unknown;
+  if (!lu) return null;
+  // 已经有「本地安装包…」那条状态行时不再重复说（同一件事只说一次）
+  const row = el('div', 'c-state warn');
+  row.appendChild(el('span', 'c-state-ico', '!'));
+  row.appendChild(el('span', '', '本地有同名文件 ' + lu.name + '（' + fmtSize(lu.size)
+    + '），但不是本应用为这一版下载的（可能是你归档的旧版本）—— 点「下载」会重新取一份并覆盖它'));
   return row;
 }
 
@@ -475,7 +485,9 @@ function render() {
     ? ('可清理：' + pk.count + ' 个 · ' + fmtSize(pk.size))
     : '可清理：无（本应用下载的包，装完会自动清掉）')
     + (fg ? ('　·　另有 ' + fg + ' 个不是本应用下载的（' + fmtSize(pk.foreign_size)
-      + '），不会动') : '');
+      + '），不会动') : '')
+    + ((pk.parts_count) ? ('　·　下载残留 ' + pk.parts_count + ' 个（'
+      + fmtSize(pk.parts_size) + '）') : '');
   // 主题以服务端设置为准（首屏用的是本地缓存）
   if (st.theme && st.theme !== themePref) {
     themePref = applyTheme(st.theme);
@@ -533,7 +545,8 @@ async function doClean() {
   } catch (e) { toast(e.message, 'err'); return; }
   const items = r.items || [];
   const fgn = r.foreign_count || 0;
-  if (!items.length) {
+  const parts = r.parts_count || 0;
+  if (!items.length && !parts) {
     toast('没有可清理的安装包' + (fgn ? '（另有 ' + fgn + ' 个不是本应用下载的，不会动）' : ''), '');
     await refresh();
     return;
@@ -541,8 +554,11 @@ async function doClean() {
   const lines = items.slice(0, 8).map((i) => '· ' + i.name + '（' + fmtSize(i.size) + '）');
   const more = items.length > 8 ? ('\n… 以及另外 ' + (items.length - 8) + ' 个') : '';
   const where = items[0].path.replace(/\/[^/]*$/, '');
-  if (!confirm('清理 ' + items.length + ' 个安装包，共 ' + fmtSize(r.size) + '？\n\n'
-    + lines.join('\n') + more
+  const what = items.length
+    ? ('清理 ' + items.length + ' 个安装包，共 ' + fmtSize(r.size) + '？')
+    : ('清理 ' + parts + ' 个下载残留，共 ' + fmtSize(r.parts_size) + '？');
+  if (!confirm(what + '\n\n'
+    + (items.length ? (lines.join('\n') + more) : ('· ' + (r.parts || []).slice(0, 8).join('\n· ')))
     + '\n\n位置：' + where
     + (fgn ? ('\n\n同目录里另有 ' + fgn + ' 个不是本应用下载的安装包（'
       + fmtSize(r.foreign_size) + '），不会动。') : '')
@@ -551,8 +567,10 @@ async function doClean() {
   try {
     const d = await api('/api/clean', { method: 'POST', body: {} });
     const n = (d.deleted || []).length;
+    const np = (d.parts_deleted || []).length;
     const bad = (d.failed || []).length;
-    let msg = '已清理 ' + n + ' 个，释放 ' + fmtSize(d.freed);
+    let msg = '已清理 ' + (n + np) + ' 项，释放 '
+      + fmtSize((d.freed || 0) + (d.parts_freed || 0));
     if (bad) msg += '；' + bad + ' 个没删掉（' + d.failed[0].reason + '）';
     toast(msg, bad ? '' : 'ok');
     await refresh();
@@ -725,8 +743,10 @@ const CONFIRM = {
   download: (a) => '下载「' + (a.display || a.appname) + '」的安装包？\n\n'
     + '版本 ' + a.latest + '（' + fmtSize(a.size) + '）\n'
     + '只下载到本地并校验 sha256，不会改动应用。',
+  // downloaded 可能已被清理/目录换过而缺失：这里必须兜底，否则「重试」一点就抛
+  // TypeError（点击处理器里没有 try/catch）→ 按钮毫无反应、也没有任何提示。
   install: (a) => '用已下载的安装包安装「' + (a.display || a.appname) + '」？\n\n'
-    + a.installed + ' → ' + a.downloaded.version + '\n'
+    + a.installed + ' → ' + ((a.downloaded && a.downloaded.version) || a.latest || '?') + '\n'
     + '安装过程中该应用会短暂重启，数据不会丢失。',
   update: (a) => '下载并更新「' + (a.display || a.appname) + '」？\n\n'
     + a.installed + ' → ' + a.latest + '\n'

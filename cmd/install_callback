@@ -1,5 +1,5 @@
 #!/bin/bash
-# 安装后：把安装向导里设置的访问密码落盘（留空则用默认 password）
+# 安装后：把安装向导里填的 GitHub 令牌落盘（留空则走匿名额度）
 #
 # 为什么放在这里而不是 cmd/main：
 #   向导填的值由 fnOS 以环境变量 wizard_<field> 注入【生命周期脚本】，
@@ -27,8 +27,14 @@ mkdir -p "$TRIM_PKGHOME" "$TRIM_PKGVAR/downloads" 2>/dev/null
 # GitHub 访问令牌（可选）：向导填了才落盘。只写本机数据目录，权限 600。
 # 不填也能用，但匿名额度只有 60 次/小时且按出口 IP 共享，检测容易被限流打断。
 if [ -n "${wizard_github_token:-}" ]; then
-    printf '%s\n' "$wizard_github_token" > "${TRIM_PKGVAR}/github-token.txt"
-    chmod 600 "${TRIM_PKGVAR}/github-token.txt" 2>/dev/null
+    # 写入要判错：原来没有 set -e，写失败（数据目录不可写等）会被静默吞掉，
+    # 安装却报成功 —— 用户以为令牌配好了，实际还在吃匿名限流。
+    if ! printf '%s\n' "$wizard_github_token" > "${TRIM_PKGVAR}/github-token.txt"; then
+        echo "GitHub 令牌写入失败：${TRIM_PKGVAR}/github-token.txt" >&2
+        echo "GitHub 令牌写入失败" >> "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+        exit 1
+    fi
+    chmod 600 "${TRIM_PKGVAR}/github-token.txt" 2>/dev/null || true
 fi
 
 # 数据目录里留一份人类可读的说明（用户从应用中心"数据目录"进去能看到）

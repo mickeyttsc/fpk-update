@@ -17,6 +17,11 @@ GATE_DIR="$(cd "$(dirname "$0")" && pwd)"
 printf 'SENTINEL_CANARY\n' > "$TMP/canary"
 grep -q SENTINEL_CANARY "$TMP/canary" || fail "门禁自检失败：grep 通路异常"
 
+# ── 0b. 门禁自身不是空转：逐条破坏修复点，确认会被拦住（约 13 秒）──
+#     放在最前面：如果门禁逻辑被改坏了，后面所有断言都可能是假绿。
+python3 "$GATE_DIR/verify-gates-reverse.py" \
+    || fail "门禁反向验证未通过：有修复点被破坏后门禁仍放行"
+
 # ── 1. 外层结构 ──
 tar tzf "$FPK" > "$TMP/outer.list" || fail "外层不是有效 tar.gz"
 for f in manifest manifest.checksum cmd config wizard app.tgz ICON.PNG ICON_256.PNG; do
@@ -72,7 +77,7 @@ getf() { grep -E "^$1[[:space:]]*=" "$TMP/manifest" | sed -n '1p' | sed 's/.*=[[
 [ "$(getf service_port)" = "18600" ] || fail "service_port 必须为 18600，实际=$(getf service_port)"
 [ "$(getf ctl_stop)" = "true" ] || fail "ctl_stop 必须为 true（否则应用中心停止按钮不生效）"
 MF_VER="$(getf version)"
-printf '%s' "$MF_VER" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$' || fail "version 格式非法: $MF_VER"
+printf '%s' "$MF_VER" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?$' || fail "version 格式非法: $MF_VER（期望 1.0.0 或 1.0.0-1）"
 
 # 桌面入口端口必须与 manifest 的 service_port 一致（不一致 → 桌面图标打不开）
 tar xzf "$TMP/app.tgz" -C "$TMP"
@@ -98,6 +103,9 @@ python3 "$GATE_DIR/verify-server-safety.py" "$TMP/bin/server.py" \
 # 清理 = 删文件，是本应用唯一有破坏力的动作 —— 必须真跑一遍护栏
 python3 "$GATE_DIR/verify-clean-safety.py" "$TMP/bin/server.py" \
     || fail "安装包清理安全门禁未通过（见上面的 ::error:: 明细）"
+# 运行时健壮性：残留任务自愈 / 瞬时重试 / 不静默换包 / 残留清理 / 并发不丢更新
+python3 "$GATE_DIR/verify-runtime-recovery.py" "$TMP/bin/server.py" \
+    || fail "运行时健壮性门禁未通过（见上面的 ::error:: 明细）"
 
 # 语法必须能过（装机前就拦住写坏的代码）
 python3 -m py_compile "$TMP/bin/server.py" || fail "bin/server.py 语法错误"
@@ -219,6 +227,24 @@ grep -q 'id="pkg-state"' "$TMP/www/index.html" || fail "设置里缺少安装包
 grep -q 'only .fpk\|只清理 .fpk' "$TMP/bin/server.py" || fail "清理缺少「只删 .fpk」护栏"
 grep -q '拒绝删除' "$TMP/bin/server.py" || fail "清理缺少删除护栏"
 grep -q '#clean-btn span' "$TMP/www/style.css" || fail "清理按钮缺少手机端适配（会长出文字撑破顶栏）"
+# 本轮 QA 修掉的几类故障：接线与提示文案都要在，别被改回去
+grep -q '_recover_stale_tasks()' "$TMP/bin/server.py" || fail "缺少启动自愈（重启后任务会永久卡住）"
+grep -q 'GH_RETRIES' "$TMP/bin/server.py" || fail "GitHub 请求缺少瞬时故障重试"
+grep -q 'def orphan_parts' "$TMP/bin/server.py" || fail "缺少下载残留清点"
+grep -q 'def _safe_unlink_part' "$TMP/bin/server.py" || fail "缺少下载残留删除护栏"
+grep -q 'parts_count' "$TMP/bin/server.py" || fail "后端没有把下载残留报给界面"
+grep -q 'parts_count' "$TMP/www/app.js" || fail "界面没有呈现下载残留"
+grep -q '瞬时抖动' "$TMP/bin/server.py" || fail "读不到 Release 时没有给出可重试的说明"
+grep -q '改钉失败' "$TMP/bin/server.py" || fail "钉版本前没有校验 tag/附件是否存在"
+grep -q 'strict=True' "$TMP/bin/server.py" || fail "指定附件对不上时会被静默替换成别的包"
+grep -q 'percent": None\|percent. *: *None' "$TMP/bin/server.py" || fail "排队中的任务没有用「进度未知」表达"
+# 独立审计（第二双眼睛）发现的另外几处，逐条钉住
+grep -q '出于安全不会安装' "$TMP/bin/server.py" || fail "「安装」没有强制要求 sha256 摘要（无摘要来源会被跳过校验）"
+grep -q 'MAX_BODY_BYTES' "$TMP/bin/server.py" || fail "缺少请求体上限常量"
+grep -q 'close_connection = True' "$TMP/bin/server.py" || fail "请求体读不完时没有断开连接（残留字节会污染同连接的下一条请求）"
+grep -q '安装包内的应用名不合法' "$TMP/bin/server.py" || fail "添加应用时没有校验包内 appname 合法性"
+grep -q 'releases/tags/' "$TMP/bin/server.py" || fail "指定 tag 时没有按 tag 精确取（会被列表分页误判为不存在）"
+grep -q 'a.downloaded && a.downloaded.version' "$TMP/www/app.js" || fail "确认框里的 downloaded 没有兜底（重试会静默无反应）"
 # 下载完必须用本地包复核身份（防止「检测用启发式、装的是别的包」）
 grep -q 'read_local_fpk_manifest(fpk_path)' "$TMP/bin/server.py" \
     || fail "下载/安装前缺少本地包身份复核"

@@ -77,8 +77,12 @@ def main():
             {"appname": "cleanfnos", "asset_name": asset, "latest": "1.7.0"}]}, f)
     chk([i["name"] for i in s.list_packages()] == ["cliproxyapi-8.0.31-1.fpk"],
         "外来包不进可清理清单")
-    chk([i["name"] for i in s.foreign_packages()] == [asset],
-        "外来包被如实列为「不会动」")
+    # 外来包清单现在是**直接扫下载目录**（不再从检测结果反推）：
+    # 检测失败时 asset_name 会变 None，之前那版会让整包从两个清单里一起消失。
+    fgn = [i["name"] for i in s.foreign_packages()]
+    chk(asset in fgn and "我自己归档的旧版本.fpk" in fgn,
+        "外来包被如实列为「不会动」（扫目录，不依赖检测结果）", fgn)
+    chk("cliproxyapi-8.0.31-1.fpk" not in fgn, "台账里认领的包不算外来", fgn)
     s.save_settings({"download_dir": dl})
     ok, why = s._safe_unlink(foreign)
     chk((not ok) and os.path.isfile(foreign), "同名外来包拒绝删除", why)

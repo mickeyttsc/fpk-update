@@ -17,8 +17,11 @@ OUT_DIR="${1:-.}"
 mkdir -p "$OUT_DIR"
 
 VERSION="$(grep '^version' manifest | awk -F'=' '{print $2}' | tr -d ' ')"
-printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$' \
-    || { echo "::error:: manifest version 非法：'$VERSION'（期望形如 1.0.0-1）"; exit 1; }
+# 两种合法形态：X.Y.Z（正式版）与 X.Y.Z-N（第 N 次封装迭代）。
+# 同时支持是因为飞牛生态里两种都存在（自建三仓用 -N，CleanFnOS 这类用纯 semver），
+# 而「同一功能版本只在封装/文案上迭代」时用 -N 更准确。
+printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?$' \
+    || { echo "::error:: manifest version 非法：'$VERSION'（期望形如 1.0.0 或 1.0.0-1）"; exit 1; }
 
 echo "=== FPK更新 构建 ==="
 echo "版本: $VERSION"

@@ -39,7 +39,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 
 # ───────────────────────────── 运行环境 ─────────────────────────────
 
@@ -62,13 +62,18 @@ JOB_FILE = os.path.join(VAR_DIR, "job.json")
 SETTINGS_FILE = os.path.join(VAR_DIR, "settings.json")
 PKG_REGISTRY_FILE = os.path.join(VAR_DIR, "downloads.json")
 
+MAX_BODY_BYTES = 1 << 20       # 请求体上限（本应用的请求都是几十字节的 JSON）
 CHECK_INTERVAL_MIN = 60          # 后台自动「检测」周期（只查版本，绝不自动升级）
 HTTP_TIMEOUT = 30
 DOWNLOAD_TIMEOUT = 900
 
 CST = timezone(timedelta(hours=8))
 
-_lock = threading.Lock()
+# 白名单 / 设置 / 安装包台账 的读改写共用这一把锁。用 RLock 而非 Lock：
+# 这些操作彼此会调用（例如清点台账时读白名单），可重入才不会自己把自己锁死。
+_lock = threading.RLock()
+# 检测的并发闸门（同一时刻只允许一轮检测在跑）
+_check_lock = threading.Lock()
 
 
 def log(msg):
@@ -93,7 +98,11 @@ def load_json(path, default=None):
 def save_json(path, data):
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp.%d" % os.getpid()
+        # 临时名必须**每次调用都唯一**：原来只用 pid，同一进程里两个线程同时写同一个
+        # 文件时会撞在一起（一个把另一个的临时文件改名走了）→ 内容交错或整条更新丢失。
+        # 加线程号 + 单调时钟纳秒：同一线程两次调用不可能落在同一个纳秒上。
+        tmp = "%s.tmp.%d.%d.%d" % (path, os.getpid(), threading.get_ident(),
+                                   time.monotonic_ns())
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.flush()
@@ -315,15 +324,42 @@ def token_hint():
     return "…%s（%d 位）" % (tok[-4:], len(tok))
 
 
-def gh_get(url):
-    req = urllib.request.Request(url)
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("User-Agent", "fpk-update/1.0")
-    tok = gh_token()
-    if tok:
-        req.add_header("Authorization", "token %s" % tok)
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
-        return json.loads(r.read().decode("utf-8", "replace"))
+GH_RETRIES = 2                  # 瞬时故障重试次数
+GH_RETRY_WAIT = 0.8             # 首次重试等待（之后线性增长）
+
+
+def gh_get(url, retries=GH_RETRIES):
+    """请求 GitHub API，瞬时故障自动重试。
+
+    为什么必须有重试：实测遇到过一次「find_release 返回空 → 界面报『仓库没有可用的
+    Release』」，而几秒后完全相同的调用一切正常（GitHub 侧瞬时抖动）。
+    没有重试的话，这种抖动会变成一条**误导用户且会持续到下次检测**的失败状态
+    （错误会被写进 last-check 缓存）。重试把这类抖动挡在用户看不见的地方。
+
+    4xx（除 429）是确定性错误，重试没意义，原样抛给上层翻译成人话。
+    """
+    last = None
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url)
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("User-Agent", "fpk-update/1.0")
+        tok = gh_token()
+        if tok:
+            req.add_header("Authorization", "token %s" % tok)
+        try:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500 and exc.code != 429:
+                raise
+            last = exc
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            last = exc
+        if attempt < retries:
+            log("GitHub 请求失败（第 %d 次）：%s —— %.1f 秒后重试"
+                % (attempt + 1, last, GH_RETRY_WAIT * (attempt + 1)))
+            time.sleep(GH_RETRY_WAIT * (attempt + 1))
+    raise last
 
 
 
@@ -395,8 +431,10 @@ def _load_manifest_cache():
 
 
 def _save_manifest_cache():
+    # 读改写加锁：检测线程与网页请求可能同时触发读 manifest 并写这份缓存
     if _manifest_cache is not None:
-        save_json(MANIFEST_CACHE_FILE, _manifest_cache)
+        with _lock:
+            save_json(MANIFEST_CACHE_FILE, _manifest_cache)
 
 
 def _parse_manifest(text):
@@ -623,7 +661,7 @@ def read_local_fpk_manifest(path, max_members=400):
 
 # ───────────────────────────── 源解析（仓库 / 直链） ─────────────────────────────
 
-def _pick_asset(assets, want_arch=None, pattern=None):
+def _pick_asset(assets, want_arch=None, pattern=None, strict=False):
     """在多个 .fpk 附件里挑一个。
 
     优先级（都只是「同一架构内怎么选」，不改变架构判定）：
@@ -635,6 +673,10 @@ def _pick_asset(assets, want_arch=None, pattern=None):
          两个包体积只差 184 字节，哪天反过来就会挑错，用户点图标变成弹浏览器。
       4. 名字里带 untested 的排最后（作者自己标了没测过）
       5. 都不满足时取体积大的
+
+    `strict=True`：用户明确指定了 asset（或通配符）但一个都没命中时**报错而不是
+    悄悄回退成自动挑选**。回退很危险 —— 可能挑到另一个架构、或另一个入口形态的包，
+    用户以为自己钉的是 A，实际装的是 B。真正要装之前必须把这个说清楚。
     """
     import fnmatch
     cands = list(assets)
@@ -647,6 +689,9 @@ def _pick_asset(assets, want_arch=None, pattern=None):
             hit = [a for a in cands if str(a.get("name") or "") == pat]
         if hit:
             cands = hit
+        elif strict:
+            raise RuntimeError("这个 Release 里没有匹配「%s」的 .fpk 附件；可选：%s"
+                               % (pat, "、".join(str(a.get("name")) for a in cands)))
     want_arch = want_arch or device_arch()
     other = "arm" if want_arch == "x86" else "x86"
 
@@ -696,12 +741,39 @@ def normalize_source(entry):
 
 
 def find_release(repo, allow_prerelease=False, want_tag=""):
-    """找一个可用的 Release（不要求 tag 长得像版本号 —— 版本从 fpk 里读）。"""
-    data = gh_get("https://api.github.com/repos/%s/releases?per_page=30" % repo)
-    if not isinstance(data, list):
-        raise ValueError("GitHub 返回格式异常")
+    """找一个可用的 Release（不要求 tag 长得像版本号 —— 版本从 fpk 里读）。
+
+    找不到时**要说清是哪一种「找不到」** —— 空列表、全是 draft/预发布、附件还没传完
+    是完全不同的三件事，报成一句笼统的「没有可用的 Release」会让人以为是自己配错了。
+    实测踩过：GitHub 瞬时返回空列表 → 界面报「仓库没有可用的 Release」，几秒后同样
+    调用正常。所以这里对「列表为空」单独给一句带重试指引的话。
+    """
+    if want_tag:
+        # 直接问「这个 tag 的 Release」，而不是在前 N 条列表里找。
+        # 原因：列表是分页的（UI 的版本下拉能列出 50 个），用户完全可能选一个排在
+        # 第 31 位之后的旧版本做回滚 —— 在 30 条的列表里找不到就会被误判成「不存在」。
+        try:
+            one = gh_get("https://api.github.com/repos/%s/releases/tags/%s"
+                         % (repo, quote(str(want_tag))))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise RuntimeError("仓库 %s 里没有 tag 为 %s 的 Release" % (repo, want_tag))
+            raise
+        if not isinstance(one, dict):
+            raise ValueError("GitHub 返回格式异常")
+        data = [one]
+    else:
+        data = gh_get("https://api.github.com/repos/%s/releases?per_page=50" % repo)
+        if not isinstance(data, list):
+            raise ValueError("GitHub 返回格式异常")
+    if not data:
+        raise RuntimeError(
+            "仓库 %s 这次读不到任何 Release —— 多半是 GitHub 侧瞬时抖动。"
+            "点一次「检查更新」重试即可。" % repo)
+    skipped_draft = skipped_pre = 0
     for rel in data:
         if rel.get("draft"):
+            skipped_draft += 1
             continue
         tag = str(rel.get("tag_name") or "")
         if want_tag:
@@ -709,8 +781,10 @@ def find_release(repo, allow_prerelease=False, want_tag=""):
                 continue
         else:
             if rel.get("prerelease") and not allow_prerelease:
+                skipped_pre += 1
                 continue
             if tag.strip().lower() in ROLLING_TAGS and not allow_prerelease:
+                skipped_pre += 1
                 continue
         assets = [a for a in (rel.get("assets") or [])
                   if str(a.get("name") or "").lower().endswith(".fpk")]
@@ -723,7 +797,13 @@ def find_release(repo, allow_prerelease=False, want_tag=""):
             "notes": (rel.get("body") or "").strip()[:400],
             "assets": assets,
         }
-    return None
+    if want_tag:
+        raise RuntimeError("仓库 %s 里没有 tag 为 %s 的 Release（或者它的附件还不叫 .fpk）"
+                           % (repo, want_tag))
+    raise RuntimeError(
+        "仓库 %s 的 %d 个 Release 里没有可用的 .fpk 附件（draft %d 个、预发布/滚动 tag %d 个已跳过）。"
+        "如果是刚发布的版本，等附件上传完再点一次「检查更新」。"
+        % (repo, len(data), skipped_draft, skipped_pre))
 
 
 def list_options(source, max_releases=20):
@@ -819,7 +899,10 @@ def resolve_source(entry):
         rel = find_release(src["repo"], src["allow_prerelease"], src["tag"])
         if not rel:
             raise RuntimeError("仓库 %s 没有可用的 Release（含 .fpk 附件）" % src["repo"])
-        asset = _pick_asset(rel["assets"], pattern=src["asset"] or None)
+        # strict：用户显式指定了 asset 而名字对不上时直接报错。
+        # 静默回退成「自动挑」会很危险 —— 可能挑到另一个架构或另一个入口形态的包，
+        # 用户以为钉的是 A、实际装的是 B。
+        asset = _pick_asset(rel["assets"], pattern=src["asset"] or None, strict=True)
         asset_url = asset.get("browser_download_url")
         asset_name = asset.get("name")
         digest = str(asset.get("digest") or "")
@@ -1043,6 +1126,7 @@ def check_one(app):
         "asset_name": None,
         "size": None,
         "downloaded": None,
+        "local_unknown": None,
         "detected_appname": None,
         "sha256": "",
     }
@@ -1107,17 +1191,28 @@ def check_one(app):
                         + "（版本取自 Release tag：该安装包读不到 manifest）").strip()
 
     # 本地是否已经下好这一版（决定「安装」按钮能不能点）
+    # 本地是否已经下好这一版（决定「安装」按钮能不能点）。
+    # 身份必须以**台账**为准（台账记着本应用下载的版本 + sha256 前 16 位）。
+    # 原来只看「同名文件在不在」——对附件名不带版本号的仓库，上游一发新版就会把
+    # 用户自己归档的同名旧包当成当前版本：界面要么误报「本地安装包不完整」，
+    # 要么显示「已在本地：<新版本>」而点安装时报「sha256 与 Release 不一致」，
+    # 把正常状态说成文件被篡改。
     try:
         d = download_dir()
         local = os.path.join(d, rel["asset_name"])
         if os.path.isfile(local):
-            item["downloaded"] = {
-                "version": rel["version"],
-                "path": local,
-                "size": os.path.getsize(local),
-                "complete": (rel.get("size") is None
-                             or os.path.getsize(local) == rel["size"]),
-            }
+            led = _load_registry().get(os.path.realpath(local)) or {}
+            want_sha = (rel.get("sha256") or "")[:16]
+            known = (norm_version(led.get("version") or "") == norm_version(rel["version"])
+                     and bool(want_sha) and led.get("sha256") == want_sha)
+            size = os.path.getsize(local)
+            if known:
+                item["downloaded"] = {
+                    "version": rel["version"], "path": local, "size": size,
+                    "complete": (rel.get("size") is None or size == rel["size"]),
+                }
+            else:
+                item["local_unknown"] = {"name": rel["asset_name"], "size": size}
     except OSError:
         pass
     return item
@@ -1168,6 +1263,22 @@ def _auto_download(results):
 
 
 def run_check(trigger="manual"):
+    """跑一轮检测。
+
+    带**并发闸门**：原来只有「距上次完成不足 10 秒就跳过」的时间节流，跑在中途的检查
+    完全不受限 —— 多标签页/桌面小窗+浏览器同开时两轮检测会并行，把按出口 IP 共享的
+    GitHub 额度翻倍烧掉（匿名只有 60 次/小时），还会并发写同一份缓存与 last-check.json。
+    """
+    if not _check_lock.acquire(blocking=False):
+        log("已有一轮检测在进行（%s），本次直接返回上次结果，不重复打 GitHub" % trigger)
+        return cached_state().get("apps") or []
+    try:
+        return _run_check_locked(trigger)
+    finally:
+        _check_lock.release()
+
+
+def _run_check_locked(trigger):
     apps = load_whitelist()
     if not apps:
         log("白名单为空，跳过检测")
@@ -1300,7 +1411,9 @@ def enqueue(appname, action):
         d["tasks"].append({
             "id": tid, "appname": appname, "display": app["display"] or appname,
             "action": action, "status": "queued", "stage": "queued",
-            "message": "排队中…", "percent": 0,
+            # percent 用 None（= 进度未知），界面据此显示「不确定态」进度条。
+            # 写 0 的话界面会画一条 0% 的空条，看起来像卡住了（实测观感问题）。
+            "message": "排队中…", "percent": None,
             "created_at": now_iso(), "updated_at": now_iso(),
         })
         _save_tasks(d)
@@ -1508,21 +1621,32 @@ class Downloader:
         if have:
             headers["Range"] = "bytes=%d-" % have
         req = urllib.request.Request(self.url, headers=headers)
-        mode = "ab" if have else "wb"
         self.done_bytes = have
-        with urllib.request.urlopen(req, timeout=self.timeout) as r, open(part, mode) as f:
-            last = time.time()
-            while True:
-                chunk = r.read(1 << 20)
-                if not chunk:
-                    break
-                f.write(chunk)
-                self.done_bytes += len(chunk)
-                if time.time() - last >= 0.4:
-                    last = time.time()
-                    self._report("downloading", "正在下载…")
-            f.flush()
-            os.fsync(f.fileno())
+        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            # 续传前必须确认服务端**真的按 Range 回应**：有些服务器/镜像直接忽略 Range
+            # 回 200 整包。那样以附加模式写下去，文件会变成「半截 + 整包」的拼接体，
+            # 最后 sha256 失败 → 报成「包被篡改/损坏」（其实只是这个源不支持续传），
+            # 而且配了多个候选地址时每个地址都白下一遍整包。
+            if have and getattr(r, "status", 200) != 206:
+                log("该地址不支持断点续传（回了 %s），已丢弃半截文件从头下：%s"
+                    % (getattr(r, "status", "?"), self.url))
+                have = 0
+                self.done_bytes = 0
+            mode = "ab" if have else "wb"
+            with open(part, mode) as f:
+                last = time.time()
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    self.done_bytes += len(chunk)
+                    if time.time() - last >= 0.4:
+                        last = time.time()
+                        self._report("downloading", "正在下载…")
+                f.flush()
+                os.fsync(f.fileno())
+        # 到这里才说明整包收全了；半截文件与目标文件都不会被当成成品
         os.replace(part, self.dest)
 
     def _segmented(self, total):
@@ -1694,12 +1818,19 @@ def do_install(tid, appname):
     try:
         update_task(tid, stage="checking", message="正在核对本地安装包…")
         rel = resolve_source(app)
+        # 没有摘要就**不许安装** —— 与「下载」保持一致。原来这里用
+        # `if rel.get("sha256") and ...` 短路，等于「来源没有摘要时完全不校验」，
+        # 而下载目录往往就是用户的归档目录、里面可能有同名文件 →
+        # 会用来源不明的本地文件覆盖一个已安装的应用，且没有任何完整性证据。
+        if not rel.get("sha256"):
+            raise RuntimeError("这个来源没有 sha256 摘要，出于安全不会安装"
+                               "（可改用仓库来源，GitHub 的 Release 附件一般带 digest）")
         d = download_dir()
         fpk_path = os.path.join(d, rel["asset_name"])
         if not os.path.isfile(fpk_path):
             raise RuntimeError("下载目录里没有 %s —— 请先点「下载」" % rel["asset_name"])
         got = _sha256_file(fpk_path)
-        if rel.get("sha256") and got != rel["sha256"]:
+        if got != rel["sha256"]:
             raise RuntimeError("本地安装包 sha256 与 Release 不一致（可能已损坏或被替换）："
                                "期望 %s…，实际 %s…" % (rel["sha256"][:16], got[:16]))
         mf = read_local_fpk_manifest(fpk_path)
@@ -1708,9 +1839,13 @@ def do_install(tid, appname):
         target_ver = mf["version"]
         cur = installed_version(appname)
         if norm_version(cur or "") == norm_version(target_ver):
+            # 已经是这一版：不装，但本地这个包就是多余的 —— 自动清理开着就一并清掉，
+            # 否则「装完自动清理」在这条路径上会静默失约（界面通常不会走到这里，
+            # 因为同版本时「安装」按钮是禁用的，但 API 可以）。
+            note = clean_after_install(appname, fpk_path, target_ver)
             update_task(tid, status="ok", stage="done", percent=100,
-                        message="已是该版本（%s），无需安装" % cur, version=target_ver,
-                        finished_at=now_iso())
+                        message="已是该版本（%s），无需安装%s" % (cur, note), version=target_ver,
+                        path=("" if note else fpk_path), finished_at=now_iso())
             return
         upgrade_via_daemon(fpk_path, appname, target_ver, progress=_task_progress(tid))
         note = clean_after_install(appname, fpk_path, target_ver)
@@ -1903,9 +2038,12 @@ def validate_download_dir(path):
 
 
 def save_settings(new):
-    cur = load_settings()
-    cur.update(new)
-    save_json(SETTINGS_FILE, cur)
+    # 读改写要加锁：两个并发的设置请求（界面同时改主题和自动清理）各自读到旧值再写回，
+    # 后写的那次会覆盖前一次，用户以为改好了其实没生效。
+    with _lock:
+        cur = load_settings()
+        cur.update(new)
+        save_json(SETTINGS_FILE, cur)
     return cur
 
 
@@ -1930,21 +2068,25 @@ def _save_registry(d):
 def record_package(path, appname="", version="", size=0, sha256=""):
     """记下本应用下载过的安装包。清理功能只认这份台账。"""
     p = os.path.realpath(path)
-    d = _load_registry()
-    d[p] = {"appname": appname, "version": version, "size": int(size or 0),
-            "sha256": (sha256 or "")[:16], "at": now_iso()}
-    if len(d) > 500:                      # 只留最近 500 条，避免台账无限膨胀
-        for k in list(d)[:-500]:
-            d.pop(k, None)
-    _save_registry(d)
+    # 读改写整体加锁：下载线程在写台账的同时，网页可能在清理（也在改这份台账），
+    # 不加锁会丢条目 —— 后果是那个包从此「清理不掉」（不会误删，但会残留）。
+    with _lock:
+        d = _load_registry()
+        d[p] = {"appname": appname, "version": version, "size": int(size or 0),
+                "sha256": (sha256 or "")[:16], "at": now_iso()}
+        if len(d) > 500:                  # 只留最近 500 条，避免台账无限膨胀
+            for k in list(d)[:-500]:
+                d.pop(k, None)
+        _save_registry(d)
     return p
 
 
 def forget_package(path):
     p = os.path.realpath(path)
-    d = _load_registry()
-    if d.pop(p, None) is not None:
-        _save_registry(d)
+    with _lock:
+        d = _load_registry()
+        if d.pop(p, None) is not None:
+            _save_registry(d)
 
 
 def _foreign_asset_paths():
@@ -1991,15 +2133,16 @@ def list_packages():
         os.path.realpath(download_dir())
     except Exception:                     # noqa: BLE001
         return []
-    seen, reg, changed = {}, _load_registry(), False
-    for p, meta in list(reg.items()):
-        if not os.path.isfile(p):         # 已经不在了 → 顺手把台账清干净
-            reg.pop(p, None)
-            changed = True
-            continue
-        seen[p] = dict(meta)
-    if changed:
-        _save_registry(reg)
+    with _lock:                           # 读改写整体在锁内（与下载线程的登记互斥）
+        seen, reg, changed = {}, _load_registry(), False
+        for p, meta in list(reg.items()):
+            if not os.path.isfile(p):     # 已经不在了 → 顺手把台账清干净
+                reg.pop(p, None)
+                changed = True
+                continue
+            seen[p] = dict(meta)
+        if changed:
+            _save_registry(reg)
     items = []
     for p, meta in seen.items():
         try:
@@ -2017,27 +2160,99 @@ def list_packages():
 
 
 def foreign_packages():
-    """同目录里本应用**不会动**的安装包（只用于如实告知用户）。"""
+    """下载目录里本应用**不会动**的安装包（直接扫目录，只用于如实告知用户）。
+
+    为什么扫目录、而不是从检测结果的 asset_name 反推：某个应用一旦检测失败
+    （限流 / tag 钉错 / 仓库改名 / 条目被移除），它的 asset_name 就成了 None，
+    那份归档包会**从两个清单里一起消失** —— 用户看到的占用数字严重偏小。
+    实测：目录里一份 357MB 的 Ekko 包就这样「隐身」过。
+    """
     owned = {os.path.realpath(i["path"]) for i in list_packages()}
     out = []
-    for p, meta in _foreign_asset_paths().items():
-        if p in owned or not os.path.isfile(p):
+    try:
+        d = os.path.realpath(download_dir())
+        names = sorted(os.listdir(d))
+    except OSError:
+        return out
+    for nm in names:
+        if not nm.lower().endswith(".fpk"):
+            continue
+        p = os.path.join(d, nm)
+        if os.path.islink(p) or not os.path.isfile(p) or os.path.realpath(p) in owned:
             continue
         try:
             sz = os.path.getsize(p)
         except OSError:
             continue
-        out.append({"name": os.path.basename(p), "size": sz,
-                    "appname": meta.get("appname") or ""})
-    out.sort(key=lambda x: x["name"])
+        out.append({"name": nm, "size": sz, "appname": ""})
     return out
 
 
 def package_summary():
     items = list_packages()
     fgn = foreign_packages()
+    parts = [p for p in orphan_parts() if p["old_enough"]]
     return {"count": len(items), "size": sum(i["size"] for i in items),
-            "foreign_count": len(fgn), "foreign_size": sum(i["size"] for i in fgn)}
+            "foreign_count": len(fgn), "foreign_size": sum(i["size"] for i in fgn),
+            "parts_count": len(parts), "parts_size": sum(p["size"] for p in parts)}
+
+
+PART_KEEP_SEC = 3600              # 分片文件闲置超过这么久才算「孤儿」
+
+# 下载引擎下大包时会先写 `<包名>.part0/.part1/...`，合并时还会临时写 `.merge`。
+# 正常结束会自己删掉；但下载失败、或「下到一半换了版本」（目标文件名变了）时，
+# 这些中间文件就永远留在下载目录里 —— 而清理功能只认 .fpk 台账，一辈子清不掉。
+# 判据用**闲置时间**而不是「有没有任务在跑」：进行中的下载在持续写自己的分片、
+# mtime 必然很新，所以「闲置一小时以上」既能清掉孤儿，又绝不会碰到正在下的分包。
+
+
+def orphan_parts(now=None):
+    """下载目录里残留的中间文件（`*.fpk.partN` / `*.fpk.merge`），只列闲置够久的。"""
+    try:
+        d = os.path.realpath(download_dir())
+    except Exception:                     # noqa: BLE001
+        return []
+    now = now if now is not None else time.time()
+    out = []
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return out
+    for nm in names:
+        if not re.match(r"^.+\.fpk\.(part[0-9]+|merge)$", nm):
+            continue
+        full = os.path.join(d, nm)
+        if not os.path.isfile(full) or os.path.islink(full):
+            continue
+        try:
+            st = os.stat(full)
+        except OSError:
+            continue
+        out.append({"path": full, "name": nm, "size": st.st_size,
+                    "idle": int(now - st.st_mtime),
+                    "old_enough": (now - st.st_mtime) >= PART_KEEP_SEC})
+    return out
+
+
+def _safe_unlink_part(path):
+    """删一个中间分片文件。护栏：必须在下载目录直属层级、名字形态对得上、闲置够久。"""
+    p = os.path.realpath(str(path or ""))
+    if os.path.islink(str(path or "")):
+        return False, "这是符号链接，拒绝删除"
+    if os.path.dirname(p) != os.path.realpath(download_dir()):
+        return False, "不在当前的安装包下载目录里，拒绝删除"
+    if not re.match(r"^.+\.fpk\.(part[0-9]+|merge)$", os.path.basename(p)):
+        return False, "不是下载中间文件"
+    if not os.path.isfile(p):
+        return False, "文件不存在"
+    try:
+        idle = time.time() - os.stat(p).st_mtime
+    except OSError:
+        return False, "读不到文件状态"
+    if idle < PART_KEEP_SEC:
+        return False, "可能正在下载中（闲置不足 %d 秒），拒绝删除" % PART_KEEP_SEC
+    os.unlink(p)
+    return True, ""
 
 
 def _safe_unlink(path):
@@ -2068,7 +2283,7 @@ def _safe_unlink(path):
 
 
 def clean_packages():
-    """一键清理：删掉所有可清理的安装包，返回删了什么、释放了多少、哪些没删掉。"""
+    """一键清理：删掉所有可清理的安装包 + 残留的下载中间文件。"""
     deleted, failed, freed = [], [], 0
     for it in list_packages():
         if it["locked"]:
@@ -2080,7 +2295,18 @@ def clean_packages():
             freed += it["size"]
         else:
             failed.append({"name": it["name"], "reason": why})
-    return {"deleted": deleted, "failed": failed, "freed": freed}
+    parts, parts_freed = [], 0
+    for it in orphan_parts():
+        if not it["old_enough"]:
+            continue
+        ok, why = _safe_unlink_part(it["path"])
+        if ok:
+            parts.append(it["name"])
+            parts_freed += it["size"]
+        else:
+            failed.append({"name": it["name"], "reason": why})
+    return {"deleted": deleted, "failed": failed, "freed": freed,
+            "parts": parts, "parts_freed": parts_freed}
 
 
 def clean_after_install(appname, fpk_path, target_version):
@@ -2184,11 +2410,24 @@ class Handler(BaseHTTPRequestHandler):
         return self.headers.get("X-Requested-With") == "fpk-update"
 
     def _read_body(self):
+        """读请求体。
+
+        关键约束：**读不完就必须断开连接**。HTTP/1.1 是长连接，socket 里剩下的字节会被
+        BaseHTTPRequestHandler 当成下一条请求行解析 —— 表现为「同一条连接上的后续请求
+        莫名 400/垃圾响应」。本应用的请求体都是几十字节，所以超限直接拒并断开最干脆。
+        """
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
+            # Content-Length 本身不合法：无法知道还有多少字节没读 → 断开
+            self.close_connection = True
             return {}
-        if n <= 0 or n > 1 << 20:
+        if n <= 0:
+            return {}
+        if n > MAX_BODY_BYTES:
+            log("请求体过大（%d 字节 > %d），拒绝并断开连接：%s"
+                % (n, MAX_BODY_BYTES, self.path))
+            self.close_connection = True
             return {}
         try:
             return json.loads(self.rfile.read(n).decode("utf-8"))
@@ -2401,15 +2640,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "tasks": clear_finished_tasks()})
 
         if path == "/api/clean":
-            # 一键清理安装包。**只清本应用自己下载过的**（台账）。
+            # 一键清理安装包 + 下载残留（中间分片）。**只清本应用自己下载过的**（台账）。
             # `dry` 只复盘不删（界面在确认前先取一次清单）。
             body = self._read_body()
             items = list_packages()
             fgn = foreign_packages()
+            parts = [p for p in orphan_parts() if p["old_enough"]]
             extra = {"foreign_count": len(fgn),
                      "foreign_size": sum(i["size"] for i in fgn),
-                     "foreign": [i["name"] for i in fgn]}
-            if not items:
+                     "foreign": [i["name"] for i in fgn],
+                     "parts": [p["name"] for p in parts],
+                     "parts_count": len(parts),
+                     "parts_size": sum(p["size"] for p in parts)}
+            if not items and not parts:
                 return self._json({"ok": True, "dry": bool(body.get("dry")),
                                    "items": [], "count": 0, "size": 0,
                                    "deleted": [], "failed": [], "freed": 0, **extra})
@@ -2418,12 +2661,16 @@ class Handler(BaseHTTPRequestHandler):
                                    "count": len(items),
                                    "size": sum(i["size"] for i in items), **extra})
             res = clean_packages()
-            log("[清理] 删除 %d 个安装包（%s），释放 %s；未删 %d 个"
+            log("[清理] 删除 %d 个安装包（%s）与 %d 个下载残留，释放 %s；未删 %d 个"
                 % (len(res["deleted"]), ",".join(res["deleted"]) or "-",
-                   _human(res["freed"]), len(res["failed"])))
-            return self._json({"ok": True, "dry": False, "count": len(res["deleted"]),
+                   len(res.get("parts") or []),
+                   _human(res["freed"] + res.get("parts_freed", 0)), len(res["failed"])))
+            return self._json({"ok": True, "dry": False,
+                               "count": len(res["deleted"]),
                                "size": sum(i["size"] for i in items),
                                "deleted": res["deleted"],
+                               "parts_deleted": res.get("parts") or [],
+                               "parts_freed": res.get("parts_freed", 0),
                                "failed": res["failed"], "freed": res["freed"], **extra})
 
         if path == "/api/job/dismiss":
@@ -2521,6 +2768,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 return self._err(400, "无法识别：%s" % exc)
             appname = rel["appname"]
+            # 包内应用名不合法就别写进配置：写进去会在读回时被静默丢弃（白名单校验更严），
+            # 用户看到「已添加」但列表里什么都没有 —— 说不清到底发生了什么。
+            if not APPNAME_RE.match(appname or ""):
+                return self._err(400, "安装包内的应用名不合法（%r），拒绝添加" % appname)
             # 只能管理「本机已安装」的应用 —— 硬边界
             if not installed_version(appname):
                 return self._err(400, "该安装包对应应用 %s，但本机没有安装它，无法管理"
@@ -2557,6 +2808,36 @@ class Handler(BaseHTTPRequestHandler):
             asset = str(body.get("asset") or "").strip()
             if not key:
                 return self._err(400, "缺少 source")
+
+            # 先在锁外做只读查找：把网络请求放到锁外，否则一次 GitHub 抖动会把
+            # 所有白名单操作卡住（重试最多几十秒）。
+            target_repo = None
+            for item in (_whitelist_doc().get("apps") or []):
+                if not isinstance(item, dict):
+                    continue
+                s = normalize_source(item)
+                if (s["repo"] or s["url"]) == key or (s["appname"] and s["appname"] == key):
+                    target_repo = s["repo"]
+                    break
+            if target_repo is None:
+                return self._err(404, "列表里没有这个来源")
+
+            # 校验用户钉的版本/附件**真实存在** —— 之前是不校验直接写，
+            # 实测能把条目钉到一个根本不存在的 tag 上：界面显示「已改钉」，
+            # 之后每次检测都失败，而错误信息看起来像是仓库的问题。
+            if tag or asset:
+                try:
+                    rel = find_release(target_repo, True, tag) if tag else \
+                        find_release(target_repo, True, "")
+                    if asset:
+                        _pick_asset(rel["assets"], pattern=asset, strict=True)
+                except ValueError as exc:
+                    return self._err(400, "改钉失败：%s" % exc)
+                except urllib.error.HTTPError as exc:
+                    return self._err(400, "改钉失败：%s" % _gh_error_message(exc))
+                except Exception as exc:  # noqa: BLE001
+                    return self._err(400, "改钉失败：%s" % exc)
+
             with _lock:
                 doc = _whitelist_doc()
                 hit = None
@@ -2642,6 +2923,38 @@ def checker_loop():
         time.sleep(max(300, CHECK_INTERVAL_MIN * 60))
 
 
+def _recover_stale_tasks():
+    """启动时收拾上一次进程留下的「进行中」任务。
+
+    为什么必须有：tasks.json 是落盘的，服务重启（升自己、重启应用、断电）时可能停在
+    status=running。而新起的 worker_loop **只认 queued**，永远不会再碰它 →
+    那条任务就永久卡在「进行中」。后果是：
+      · 入队去重会把它当成「同一动作已在跑」，新请求直接被吃掉、什么都不做；
+      · 界面上该应用的按钮永久禁用（`busy = running`）；
+      · 界面唯一的「清理已完成的任务」明确保留 running 任务，用户自救不了。
+    实测确认过（注入一条 running 任务 → busy=True、再点下载返回的还是那条旧任务）。
+
+    所以启动时把「running」一律判为中断：此刻所有 running 都必然是上一个进程留下的
+    （本进程的 worker 还没开始跑）。
+    """
+    with _tasks_lock:
+        d = _load_tasks()
+        n = 0
+        for t in d["tasks"]:
+            if t.get("status") == "running":
+                t["status"] = "failed"
+                t["stage"] = "error"
+                t["message"] = "上一次任务在服务重启时中断了，请重试"
+                t["finished_at"] = now_iso()
+                t["updated_at"] = now_iso()
+                n += 1
+        if n:
+            _save_tasks(d)
+    if n:
+        log("启动自愈：把 %d 条残留的「进行中」任务标为中断（否则会永久卡住）" % n)
+    return n
+
+
 def main():
     global _worker_thread
     for d in (VAR_DIR, HOME_DIR, download_dir()):
@@ -2656,6 +2969,8 @@ def main():
     st = load_settings()
     log("下载目录=%s  分段并发=%d  加速镜像=%s"
         % (st["download_dir"], st["concurrency"], st["mirror"] or "直连"))
+    # 先自愈残留任务，再起 worker —— 顺序不能反，否则新 worker 可能先跑到别的任务上
+    _recover_stale_tasks()
     _worker_thread = threading.Thread(target=worker_loop, name="dl-worker", daemon=True)
     _worker_thread.start()
     threading.Thread(target=checker_loop, name="checker", daemon=True).start()
