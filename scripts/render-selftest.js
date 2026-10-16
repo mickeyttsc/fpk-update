@@ -18,11 +18,31 @@ function makeEl(tag) {
       toggle(c, on) { if (on === undefined) { this._s.has(c) ? this._s.delete(c) : this._s.add(c); } else if (on) this._s.add(c); else this._s.delete(c); },
       contains(c) { return this._s.has(c); },
     },
-    appendChild(c) { this.children.push(c); return c; },
+    appendChild(c) { this.children.push(c); if (c) c.parentNode = this; return c; },
+    insertBefore(c, ref) {
+      const i = ref ? this.children.indexOf(ref) : -1;
+      if (i === -1) this.children.push(c); else this.children.splice(i, 0, c);
+      if (c) c.parentNode = this;
+      return c;
+    },
+    removeChild(c) {
+      const i = this.children.indexOf(c);
+      if (i >= 0) this.children.splice(i, 1);
+      if (c) c.parentNode = null;
+      return c;
+    },
     addEventListener() {},
     setAttribute(k, v) { this._attrs[k] = String(v); },
     getAttribute(k) { return this._attrs[k] === undefined ? null : this._attrs[k]; },
   };
+  // textContent 要建模成「赋值即清空子节点」（真实 DOM 行为）。
+  // 不建模的话，「清空列表」这类操作在桩里会留下残影，测出来的结论是错的（实测踩过）。
+  let _text = '';
+  Object.defineProperty(e, 'textContent', {
+    get() { return _text; },
+    set(v) { _text = String(v); e.children.length = 0; },
+    configurable: true, enumerable: true,
+  });
   return e;
 }
 
@@ -319,6 +339,42 @@ try {
   const okOff = offChk === false && offTxt.includes('无');
   console.log(`  ${okOff ? '✔' : '✘'} 无包时如实说「无」、开关随服务端为关  -> "${offTxt}" checked=${offChk}`);
   if (!okOff) bad++;
+
+  // 检查中：顶栏要显示进度，按钮转圈，提示条给出「并行、查完一个更新一个」
+  sandbox.__setState({
+    apps: [], tasks: [], last_check: '2026-10-16T18:00:00+08:00', has_token: true,
+    app_version: '9.8.7',
+    checking: { running: true, done: 2, total: 6, current: 'cliproxyapi' },
+    settings: { download_dir: '/vol2/x', concurrency: 4, mirror: '', auto_download: false,
+      auto_clean: true, theme: 'auto' },
+    packages: { count: 0, size: 0, foreign_count: 0, foreign_size: 0, parts_count: 0, parts_size: 0 },
+    whitelist: [], mirror_presets: [], default_download_dir: '/vol2/x',
+  });
+  sandbox.__render();
+  const ckText = sandbox.__els('last-check').textContent;
+  const ckBtn = sandbox.__els('check-btn');
+  const okCk = ckText.includes('2/6') && ckText.includes('cliproxyapi')
+    && ckBtn.classList.contains('loading') && ckBtn.disabled === true;
+  console.log(`  ${okCk ? '✔' : '✘'} 检查中顶栏显示进度 x/y 且按钮转圈  -> "${ckText}"`);
+  if (!okCk) bad++;
+
+  sandbox.__setState({
+    apps: [], tasks: [], last_check: '2026-10-16T18:00:00+08:00', has_token: true,
+    app_version: '9.8.7',
+    checking: { running: false, done: 6, total: 6, current: '' },
+    settings: { download_dir: '/vol2/x', concurrency: 4, mirror: '', auto_download: false,
+      auto_clean: true, theme: 'auto' },
+    packages: { count: 0, size: 0, foreign_count: 0, foreign_size: 0, parts_count: 0, parts_size: 0 },
+    whitelist: [], mirror_presets: [], default_download_dir: '/vol2/x',
+  });
+  sandbox.__render();
+  const doneText = sandbox.__els('last-check').textContent;
+  const doneBtn = sandbox.__els('check-btn');
+  const okDone = doneText.includes('上次检查') && !doneBtn.classList.contains('loading')
+    && doneBtn.disabled === false;
+  console.log(`  ${okDone ? '✔' : '✘'} 检查结束后恢复「上次检查 时间」且按钮可点  -> "${doneText}"`);
+  if (!okDone) bad++;
+
 } catch (e) {
   console.log('  ✘ 抛异常 -> ' + e.message);
   bad++;
@@ -416,6 +472,65 @@ try {
   console.log(`  ${reEnabled ? '✔' : '✘'} 任务结束后按钮恢复可点（不再被判为进行中）`);
   console.log(`  ${showsResult ? '✔' : '✘'} 结果条显示后端给的结果文案`);
   if (!(reEnabled && showsResult)) bad++;
+} catch (e) {
+  console.log('  ✘ 抛异常 -> ' + e.message);
+  bad++;
+}
+
+/* 差分渲染：状态没变时不许重建卡片。
+   为什么值钱：每轮轮询都重建全部卡片 = 每次都新建 <img> = 重新取图标（6 个/轮，1 秒一轮），
+   而且整块 DOM 反复销毁重建本身就是看得见的抖动。 */
+console.log('────────────────────────────────────────');
+console.log('▸ 卡片差分渲染（状态不变就不重建）');
+try {
+  const A = { appname: 'aa', display: 'AA', has_icon: true, installed: '1.0',
+    latest: '1.1', update_available: true, relation: 'newer', size: 100,
+    published_at: null, error: null, downloaded: null, local_unknown: null, notes: '' };
+  const base = {
+    apps: [A], tasks: [], last_check: null, has_token: true, app_version: '9.9.9',
+    checking: { running: false, done: 0, total: 0, current: '' },
+    settings: { download_dir: '/v', concurrency: 4, mirror: '', auto_download: false,
+      auto_clean: true, theme: 'auto' },
+    packages: { count: 0, size: 0, foreign_count: 0, foreign_size: 0, parts_count: 0, parts_size: 0 },
+    whitelist: [], mirror_presets: [], default_download_dir: '/v',
+  };
+  sandbox.__setState(JSON.parse(JSON.stringify(base)));
+  sandbox.__render();
+  const first = sandbox.__els('cards').children[0];
+  sandbox.__setState(JSON.parse(JSON.stringify(base)));
+  sandbox.__render();
+  const second = sandbox.__els('cards').children[0];
+  const reused = first === second;
+  console.log(`  ${reused ? '✔' : '✘'} 同样的状态再渲染一次，卡片节点被复用（不是重建）`);
+  if (!reused) bad++;
+
+  const changed = JSON.parse(JSON.stringify(base));
+  changed.apps[0].installed = '1.1';
+  changed.apps[0].update_available = false;
+  sandbox.__setState(changed);
+  sandbox.__render();
+  const third = sandbox.__els('cards').children[0];
+  const rebuilt = third !== first;
+  console.log(`  ${rebuilt ? '✔' : '✘'} 数据真的变了才重建那张卡片`);
+  if (!rebuilt) bad++;
+
+  const t = JSON.parse(JSON.stringify(base));
+  t.tasks = [{ id: 't1', appname: 'aa', action: 'download', status: 'running',
+    percent: 7, message: '分段下载中…' }];
+  sandbox.__setState(t);
+  sandbox.__render();
+  const withTask = sandbox.__els('cards').children[0];
+  const rebuiltOnTask = withTask !== third;
+  console.log(`  ${rebuiltOnTask ? '✔' : '✘'} 任务状态变化也会重建（进度要能实时看到）`);
+  if (!rebuiltOnTask) bad++;
+
+  const empty = JSON.parse(JSON.stringify(base));
+  empty.apps = [];
+  sandbox.__setState(empty);
+  sandbox.__render();
+  const emptyOk = sandbox.__els('cards').children.length === 1;
+  console.log(`  ${emptyOk ? '✔' : '✘'} 列表清空后卡片被移除（不留残影）`);
+  if (!emptyOk) bad++;
 } catch (e) {
   console.log('  ✘ 抛异常 -> ' + e.message);
   bad++;

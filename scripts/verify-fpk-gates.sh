@@ -106,6 +106,9 @@ python3 "$GATE_DIR/verify-clean-safety.py" "$TMP/bin/server.py" \
 # 运行时健壮性：残留任务自愈 / 瞬时重试 / 不静默换包 / 残留清理 / 并发不丢更新
 python3 "$GATE_DIR/verify-runtime-recovery.py" "$TMP/bin/server.py" \
     || fail "运行时健壮性门禁未通过（见上面的 ::error:: 明细）"
+# 接口延迟：前端会调的每个接口都必须 < 200ms（网络调用换瞬时桩）；检查类接口必须立刻返回
+python3 "$GATE_DIR/verify-endpoint-latency.py" "$TMP/bin/server.py" \
+    || fail "接口延迟门禁未通过（见上面的 ::error:: 明细）"
 
 # 语法必须能过（装机前就拦住写坏的代码）
 python3 -m py_compile "$TMP/bin/server.py" || fail "bin/server.py 语法错误"

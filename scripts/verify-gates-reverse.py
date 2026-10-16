@@ -60,6 +60,10 @@ BREAKS = [
      "            return {}\n        try:\n            return json.loads(self.rfile.read(n).decode"),
     ("按 tag 精确取改回列表查找", '            one = gh_get("https://api.github.com/repos/%s/releases/tags/%s"\n                         % (repo, quote(str(want_tag))))',
      '            one = gh_get("https://api.github.com/repos/%s/releases?per_page=30" % repo)\n            one = one[0] if one else None'),
+    ("检查改回串行（去掉线程）", "            results[i] = check_one(app)",
+     "            results[i] = None"),
+    ("Release 列表不缓存", "    if hit and now - hit[0] < GH_CACHE_TTL:",
+     "    if False:"),
     ("空列表错误提示去掉重试指引", '''        raise RuntimeError(
             "仓库 %s 这次读不到任何 Release —— 多半是 GitHub 侧瞬时抖动。"
             "点一次「检查更新」重试即可。" % repo)''',
@@ -95,6 +99,43 @@ FILE_BREAKS = [
      '"helpText": "本应用没有密码，升级步骤也不需要你输入任何东西 —— 升级完直接打开就能用。"',
      '"helpText": "升级会保留你的访问密码，无需重新设置。"'),
 ]
+
+
+# 前端破坏用例：(标签, 原文, 改成) —— 跑 render-selftest.js 应当报红
+FE_BREAKS = [
+    ("卡片改回全量重建（不再复用节点）",
+     "      if (n.__sig) (pool[n.__sig] = pool[n.__sig] || []).push(n);",
+     "      if (false) (pool[n.__sig] = pool[n.__sig] || []).push(n);"),
+    ("列表清空后不清 DOM（留残影）",
+     "    cards.textContent = '';",
+     "    /* 破坏：不清空 */"),
+]
+
+
+def run_fe_breaks():
+    """在 app/www/app.js 的副本上改一处，跑前端渲染自测，返回是否被拦住。"""
+    import shutil
+    node = shutil.which("node") or "/vol2/@appcenter/nodejs_v24/bin/node"
+    if not os.path.isfile(node):
+        return None
+    results = []
+    for label, a, b in FE_BREAKS:
+        tmp = tempfile.mkdtemp(prefix="fpku-rev-fe-")
+        try:
+            shutil.copytree(os.path.join(ROOT, "app", "www"), os.path.join(tmp, "www"))
+            target = os.path.join(tmp, "www", "app.js")
+            text = io.open(target, encoding="utf-8").read()
+            if a not in text:
+                results.append((label, None))
+                continue
+            io.open(target, "w", encoding="utf-8").write(text.replace(a, b))
+            r = subprocess.run([node, os.path.join(ROOT, "scripts", "render-selftest.js"),
+                                target], capture_output=True, text=True, cwd=ROOT)
+            results.append((label, r.returncode != 0))
+        finally:
+            import shutil as sh
+            sh.rmtree(tmp, ignore_errors=True)
+    return results
 
 
 def run_guards_on_copy(rel, old_t, new_t):
@@ -175,6 +216,23 @@ def main():
                                       "被拦住" if got else "**没被拦住**"))
         if not got:
             failures += 1
+
+    print()
+    print("▸ 前端渲染（改副本 → 跑渲染自测 → 必须报红）")
+    fe = run_fe_breaks()
+    if fe is None:
+        print("  ? 本机没有 node，跳过前端反向验证")
+        failures += 1
+    else:
+        for label, got in fe:
+            if got is None:
+                print("  ? 跳过「%s」：锚点失效" % label)
+                failures += 1
+                continue
+            print("  %s 破坏「%s」→ %s" % ("✔" if got else "✘", label,
+                                          "被拦住" if got else "**没被拦住**"))
+            if not got:
+                failures += 1
 
     print()
     if failures:

@@ -84,6 +84,17 @@ def main():
         (srv, '"app_version"', "后端把本应用版本回给界面"),
         (js, "app-ver-chip", "顶栏常驻显示本应用版本"),
         (js, "app-ver-kv", "设置「运行信息」里也显示版本"),
+        (srv, '"checking": check_state()', "后端把检查进度暴露给界面"),
+        (srv, "threading.Thread(target=one", "各应用并行检查（不再是串行干等）"),
+        (srv, "检查在后台跑", "检查不再阻塞请求（立刻返回）"),
+        (srv, "def gh_releases", "Release 列表带短缓存（获取版本→预览→添加不再每步都打 GitHub）"),
+        (srv, 'public, max-age=604800', "图标可缓存（不再每次重绘都重拉）"),
+        (srv, "先在本地查重", "重复添加先本地查重（不再白跑一趟 GitHub）"),
+        (js, "__sig", "卡片差分渲染（状态没变不重建，避免每次重建都重拉图标）"),
+        (js, "function busyOn", "慢按钮有即时反馈（转圈 + 顶栏状态文字）"),
+        (js, "正在读取仓库", "「获取版本」有明确状态文字"),
+        (js, "ck.running", "前端按检查状态决定轮询快慢与按钮转圈"),
+        (js, "'正在检查 '", "顶栏显示「正在检查 x/y」"),
     ]
     print("▸ 修复点必须还在（%d 项）" % len(REQUIRED))
     for text, needle, label in REQUIRED:

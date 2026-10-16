@@ -74,6 +74,11 @@ CST = timezone(timedelta(hours=8))
 _lock = threading.RLock()
 # 检测的并发闸门（同一时刻只允许一轮检测在跑）
 _check_lock = threading.Lock()
+# 检测进度：让界面在检查期间显示「正在检查 x/y」并保持快轮询。
+# 为什么需要：串行检查 6 个应用实测要 6.1 秒，而原来是「前端 await 到底、期间零反馈」——
+# 用户感受到的就是「点一下卡六七秒」。现在改成后台跑 + 实时进度。
+_check_state = {"running": False, "done": 0, "total": 0, "current": "",
+                "trigger": "", "started_at": None, "finished_at": None}
 
 
 def log(msg):
@@ -324,6 +329,9 @@ def token_hint():
     return "…%s（%d 位）" % (tok[-4:], len(tok))
 
 
+GH_CACHE_TTL = 15               # Release 列表缓存秒数
+_gh_cache = {}                  # repo -> (ts, data)
+
 GH_RETRIES = 2                  # 瞬时故障重试次数
 GH_RETRY_WAIT = 0.8             # 首次重试等待（之后线性增长）
 
@@ -361,6 +369,29 @@ def gh_get(url, retries=GH_RETRIES):
             time.sleep(GH_RETRY_WAIT * (attempt + 1))
     raise last
 
+
+
+def gh_releases(repo):
+    """取一个仓库的 Release 列表，带 15 秒缓存。
+
+    为什么加缓存：界面上的「获取版本 → 预览 → 添加」是一串操作，每一步原来都重新打
+    一次 GitHub（实测 0.7~1.4 秒/次，用户感受就是「点一下卡一秒」）。同一份列表在
+    十几秒内复用，既快又不白烧额度。TTL 取得很短（15 秒）：刚发布的版本最多晚十几秒
+    出现，与「检查更新」本身 10 秒的节流是同一个量级，不会让人以为「检测不出来」。
+    """
+    now = time.time()
+    hit = _gh_cache.get(repo)
+    if hit and now - hit[0] < GH_CACHE_TTL:
+        return hit[1]
+    data = gh_get("https://api.github.com/repos/%s/releases?per_page=50" % repo)
+    if not isinstance(data, list):
+        raise ValueError("GitHub 返回格式异常")
+    with _lock:
+        _gh_cache[repo] = (now, data)
+        if len(_gh_cache) > 50:
+            for k in list(_gh_cache)[:-50]:
+                _gh_cache.pop(k, None)
+    return data
 
 
 def _gh_error_message(exc):
@@ -763,9 +794,7 @@ def find_release(repo, allow_prerelease=False, want_tag=""):
             raise ValueError("GitHub 返回格式异常")
         data = [one]
     else:
-        data = gh_get("https://api.github.com/repos/%s/releases?per_page=50" % repo)
-        if not isinstance(data, list):
-            raise ValueError("GitHub 返回格式异常")
+        data = gh_releases(repo)
     if not data:
         raise RuntimeError(
             "仓库 %s 这次读不到任何 Release —— 多半是 GitHub 侧瞬时抖动。"
@@ -834,7 +863,7 @@ def list_options(source, max_releases=20):
         })
         return {"source_kind": "url", "releases": out, "device_arch": device_arch()}
 
-    data = gh_get("https://api.github.com/repos/%s/releases?per_page=50" % src["repo"])
+    data = gh_releases(src["repo"])
     if not isinstance(data, list):
         raise ValueError("GitHub 返回格式异常")
     for rel in data:
@@ -1278,13 +1307,57 @@ def run_check(trigger="manual"):
         _check_lock.release()
 
 
+def check_state():
+    with _lock:
+        return dict(_check_state)
+
+
 def _run_check_locked(trigger):
     apps = load_whitelist()
     if not apps:
         log("白名单为空，跳过检测")
         return []
     log("开始检测（%s）：%d 个应用" % (trigger, len(apps)))
-    results = [check_one(a) for a in apps]
+    with _lock:
+        _check_state.update({"running": True, "done": 0, "total": len(apps),
+                             "current": "", "trigger": trigger,
+                             "started_at": datetime.now(CST).isoformat(timespec="seconds")})
+    t0 = time.time()
+    results = [None] * len(apps)
+    cnt = {"done": 0}
+    cnt_lock = threading.Lock()
+
+    def one(i, app):
+        """一个应用一个线程。
+
+        为什么并行：每个应用都要打一次 GitHub API（拿 Release）+ 读一次包内 manifest
+        （HTTP Range 好几个请求），串行 6 个应用实测 6.1 秒。并行之后 ≈ 最慢的那个。
+        """
+        try:
+            results[i] = check_one(app)
+        except Exception as exc:                      # noqa: BLE001
+            log("[%s] 检测异常：%s" % (app.get("appname") or app.get("repo"), exc))
+            results[i] = {"appname": app.get("appname") or "", "display": app.get("display") or "",
+                          "repo": app.get("repo"), "url": app.get("url"),
+                          "installed": installed_version(app.get("appname") or "") if app.get("appname") else None,
+                          "latest": None, "update_available": False, "downloaded": None,
+                          "local_unknown": None, "sha256": "", "error": "检查失败：%s" % exc}
+        with cnt_lock:
+            cnt["done"] += 1
+            done_n = cnt["done"]
+        with _lock:
+            _check_state.update({"done": done_n, "current": app.get("appname") or ""})
+
+    threads = [threading.Thread(target=one, args=(i, a), daemon=True)
+               for i, a in enumerate(apps)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    with _lock:
+        _check_state.update({"running": False, "current": "",
+                             "finished_at": datetime.now(CST).isoformat(timespec="seconds")})
+    log("检测完成：%d 个应用，用时 %.1f 秒" % (len(apps), time.time() - t0))
     for r in results:
         log("  %s: 已装=%s 最新=%s 可更新=%s%s"
             % (r["appname"], r["installed"], r["latest"],
@@ -2483,10 +2556,28 @@ class Handler(BaseHTTPRequestHandler):
             p = icon_path(appname)
             if not p:
                 return self._err(404, "没有图标")
+            # 图标只在应用升级时才变，而前端每次轮询都会重绘卡片 —— 必须让浏览器缓存。
+            # 原来是 no-cache 且无 ETag：实测每轮轮询都会重拉 6 个图标（1 秒一次）。
+            # 前端还会带上 ?v=<已装版本>，升级后 URL 变化 → 自动换新图，不会拿到旧图标。
+            etag = None
+            try:
+                stt = os.stat(p)
+                etag = '"%x-%x"' % (int(stt.st_mtime), stt.st_size)
+            except OSError:
+                pass
+            extra = {"Cache-Control": "public, max-age=604800"}
+            if etag:
+                extra["ETag"] = etag
+                if self.headers.get("If-None-Match") == etag:
+                    self.send_response(304)
+                    for k, v in extra.items():
+                        self.send_header(k, v)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
             with open(p, "rb") as f:
                 data = f.read()
-            return self._send(200, data, ctype="image/png",
-                              extra={"Cache-Control": "no-cache"})
+            return self._send(200, data, ctype="image/png", extra=extra)
 
         if path == "/api/state":
             st = cached_state()
@@ -2518,6 +2609,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 本应用自己的版本（读 /var/apps/fpk-update/manifest，即当前真正在跑的这份）。
                 # 之前界面上一个版本号都没有 —— 用户想确认「我装的是哪一版」无处可看。
                 "app_version": installed_version(APP_NAME) or "",
+                "checking": check_state(),
                 "packages": package_summary(),
             })
 
@@ -2583,14 +2675,21 @@ class Handler(BaseHTTPRequestHandler):
                     last = datetime.fromisoformat(st0["at"])
                     if (datetime.now(CST) - last).total_seconds() < 10:
                         log("检查节流：10 秒内刚查过，直接返回上次结果")
-                        return self._json({"ok": True, "apps": st0.get("apps") or [],
+                        return self._json({"ok": True, "started": False, "throttled": True,
+                                           "apps": st0.get("apps") or [],
                                            "last_check": st0.get("at"),
-                                           "throttled": True})
+                                           "checking": check_state()})
                 except ValueError:
                     pass
-            results = run_check(trigger="manual")
-            return self._json({"ok": True, "apps": results,
-                               "last_check": cached_state().get("at")})
+            if check_state()["running"]:
+                # 已经在查了：不要再排一轮。连点不该变成「排队打 GitHub」。
+                return self._json({"ok": True, "started": False, "running": True,
+                                   "checking": check_state()})
+            # 立刻返回，检查在后台跑：实测串行 6 个应用要 6.1 秒，
+            # 前端若是 await 到底，用户看到的就是「点一下卡六七秒、屏幕毫无变化」。
+            threading.Thread(target=run_check, args=("manual",), daemon=True).start()
+            return self._json({"ok": True, "started": True, "running": True,
+                               "checking": check_state()})
 
         if path in ("/api/download", "/api/install", "/api/update"):
             body = self._read_body()
@@ -2727,6 +2826,30 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(400, "无法列出可选版本：%s" % exc)
             opts["ok"] = True
             opts["source"] = src["repo"] or src["url"]
+
+            # 顺手在后台把「推荐那个附件」的 manifest 预读一下。
+            # 界面上的下一步就是「预览」，而预览最慢的一步就是读包内 manifest
+            # （要向附件所在的 CDN 发几个 Range 请求，实测 1.4 秒）。这里先把它读进缓存，
+            # 用户选完版本点「预览」时就直接命中，感觉是瞬间出来。
+            def _prefetch(url, size):
+                try:
+                    read_fpk_manifest(url, size)
+                except Exception:                     # noqa: BLE001 - 预取失败无所谓
+                    pass
+
+            _rels = opts.get("releases") or []
+            if _rels:
+                _rec = None
+                for _a in (_rels[0].get("assets") or []):
+                    if _a.get("recommended"):
+                        _rec = _a
+                        break
+                if _rec is None and (_rels[0].get("assets") or []):
+                    _rec = _rels[0]["assets"][0]
+                if _rec and _rec.get("url"):
+                    threading.Thread(target=_prefetch,
+                                     args=(_rec["url"], _rec.get("size")),
+                                     daemon=True).start()
             return self._json(opts)
 
         if path == "/api/apps/preview":
@@ -2763,6 +2886,20 @@ class Handler(BaseHTTPRequestHandler):
             body = self._read_body()
             try:
                 raw, src, entry = _entry_from_request(body)
+                # 先在本地查重（亚毫秒），再谈联网识别 ——
+                # 重复添加原来会白跑一趟 GitHub（实测 914 毫秒）才告诉你「已经在列表里」。
+                _key = src["repo"] or src["url"]
+                _dup = False
+                with _lock:
+                    for _it in (_whitelist_doc().get("apps") or []):
+                        if not isinstance(_it, dict):
+                            continue
+                        _s2 = normalize_source(_it)
+                        if (_s2["repo"] or _s2["url"]) == _key:
+                            _dup = True
+                            break
+                if _dup:
+                    return self._err(409, "这个来源已经在列表里了（可用「换版本」改它的版本）")
                 rel = resolve_source(entry)
             except ValueError as exc:
                 return self._err(400, str(exc))
@@ -2815,12 +2952,15 @@ class Handler(BaseHTTPRequestHandler):
             # 先在锁外做只读查找：把网络请求放到锁外，否则一次 GitHub 抖动会把
             # 所有白名单操作卡住（重试最多几十秒）。
             target_repo = None
+            cur_tag = cur_asset = ""
             for item in (_whitelist_doc().get("apps") or []):
                 if not isinstance(item, dict):
                     continue
                 s = normalize_source(item)
                 if (s["repo"] or s["url"]) == key or (s["appname"] and s["appname"] == key):
                     target_repo = s["repo"]
+                    cur_tag = s.get("tag") or ""
+                    cur_asset = s.get("asset") or ""
                     break
             if target_repo is None:
                 return self._err(404, "列表里没有这个来源")
@@ -2828,7 +2968,8 @@ class Handler(BaseHTTPRequestHandler):
             # 校验用户钉的版本/附件**真实存在** —— 之前是不校验直接写，
             # 实测能把条目钉到一个根本不存在的 tag 上：界面显示「已改钉」，
             # 之后每次检测都失败，而错误信息看起来像是仓库的问题。
-            if tag or asset:
+            # 只有「真的改了」才联网校验：内容没变时再打一次 GitHub 只是白等 0.7 秒
+            if (tag or asset) and (tag != cur_tag or asset != cur_asset):
                 try:
                     rel = find_release(target_repo, True, tag) if tag else \
                         find_release(target_repo, True, "")

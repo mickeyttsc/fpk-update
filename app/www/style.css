@@ -93,6 +93,13 @@ code {
    （#check-btn span{display:none}），一替换就会出现空按钮（实测踩过）。 */
 .btn.loading { pointer-events: none; }
 .btn.loading .ico { animation: btn-spin .9s linear infinite; }
+/* 没有图标可转的文字按钮（获取版本 / 添加 / 预览…）在等待时也要看得出在忙 */
+.btn.spin { pointer-events: none; }
+.btn.spin::before {
+  content: ''; width: 12px; height: 12px; flex: none;
+  border: 2px solid currentColor; border-right-color: transparent;
+  border-radius: 50%; animation: btn-spin .9s linear infinite;
+}
 @keyframes btn-spin { to { transform: rotate(360deg); } }
 .btn .ico { width: 17px; height: 17px; flex: none; }
 .btn.primary {

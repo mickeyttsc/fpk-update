@@ -421,15 +421,40 @@ function syncInput(id, val) {
   el.value = val;
 }
 
+let lastChecking = false;      // 用于识别「检查刚结束」，只在那一刻弹结论
+
 function render() {
   const s = state;
-  $('last-check').textContent = s.last_check ? ('上次检查 ' + fmtTime(s.last_check)) : '尚未检查';
+  const ck = s.checking || {};
+
+  /* 顶栏：检查中显示进度（x/y + 正在查哪个），检查完恢复「上次检查 时间」 */
+  if (ck.running) {
+    $('last-check').textContent = '正在检查 ' + (ck.done || 0) + '/' + (ck.total || 0)
+      + (ck.current ? '（' + ck.current + '）' : '') + '…';
+  } else {
+    $('last-check').textContent = s.last_check ? ('上次检查 ' + fmtTime(s.last_check)) : '尚未检查';
+  }
+  const cbtn = $('check-btn');
+  if (cbtn) {
+    cbtn.classList.toggle('loading', !!ck.running);
+    cbtn.disabled = !!ck.running;
+  }
+  if (lastChecking && !ck.running) {
+    // 检查刚结束：给一句结论（原来这结论是在 doCheck 里 await 之后弹的）
+    const apps = s.apps || [];
+    const n = apps.filter((a) => a.update_available).length;
+    const errs = apps.filter((a) => a.error).length;
+    if (n) toast('检查完成：' + n + ' 个应用有新版本');
+    else if (errs) toast('检查完成，但有 ' + errs + ' 个应用出错', 'err');
+    else toast('检查完成：全部已是最新', 'ok');
+  }
+  lastChecking = !!ck.running;
 
   const cards = $('cards');
-  cards.textContent = '';
   const apps = s.apps || [];
 
   if (!apps.length) {
+    cards.textContent = '';
     const empty = document.createElement('div');
     empty.className = 'card';
     const b = document.createElement('div');
@@ -442,9 +467,42 @@ function render() {
     b.appendChild(t); b.appendChild(p); empty.appendChild(b);
     cards.appendChild(empty);
   } else {
-    // 排序（对标应用商店）：正在动的 → 有新版本的 → 正常的，同级按名字。
-    // 这样「需要你看的东西」永远在最上面，不用在一堆卡片里找。
-    sortApps(apps).forEach((a) => cards.appendChild(renderCard(a)));
+    /* 排序（对标应用商店）：正在动的 → 有新版本的 → 正常的，同级按名字。
+       这样「需要你看的东西」永远在最上面，不用在一堆卡片里找。
+
+       ★ 差分更新：签名没变的卡片**复用原节点**，不再每轮清空重建。
+       为什么必须这么做：原来每轮轮询都 `cards.textContent=''` 再全量重建 ——
+       每次重建都新建 <img>，浏览器就得重新取一次图标（6 个/轮，有活儿时 1 秒一轮），
+       而且整块 DOM 反复销毁重建本身就是可见的抖动/闪烁。实测这是「页面感觉卡」的
+       主要来源之一。签名里带上该应用的任务状态，所以进度变化仍会重绘那一张卡。 */
+    const sigOf = (a) => {
+      const t = taskFor(a.appname);
+      return JSON.stringify([a.display, a.has_icon, a.installed, a.latest,
+        a.update_available, a.relation, a.error, a.size, a.published_at, a.notes,
+        a.downloaded, a.local_unknown, a.repo, a.url, a.asset_name,
+        t ? [t.id, t.status, t.percent, t.message, t.finished_at] : null]);
+    };
+    const pool = {};
+    Array.prototype.slice.call(cards.children).forEach((n) => {
+      if (n.__sig) (pool[n.__sig] = pool[n.__sig] || []).push(n);
+    });
+    const keep = [];
+    sortApps(apps).forEach((a) => {
+      const sig = sigOf(a);
+      const bag = pool[sig];
+      let node = (bag && bag.length) ? bag.shift() : null;
+      if (!node) { node = renderCard(a); node.__sig = sig; }
+      keep.push(node);
+    });
+    keep.forEach((n, i) => {
+      if (cards.children[i] !== n) {
+        if (cards.insertBefore) cards.insertBefore(n, cards.children[i] || null);
+        else cards.appendChild(n);
+      }
+    });
+    Array.prototype.slice.call(cards.children).forEach((n) => {
+      if (keep.indexOf(n) === -1 && cards.removeChild) cards.removeChild(n);
+    });
   }
 
   /* 顶部汇总：有几个可更新 + 一键全部更新（对标手机应用商店） */
@@ -458,6 +516,9 @@ function render() {
     showNotice('后台任务：' + (cur.display || cur.appname) + ' · '
       + actionLabel(cur.action) + ' · ' + (cur.message || '处理中…') + ' ' + extra
       + '　—— 可以关掉本页面，任务会在后台继续。', 'info');
+  } else if (s.checking && s.checking.running) {
+    showNotice('正在检查更新：' + (s.checking.done || 0) + '/' + (s.checking.total || 0)
+      + '（各应用并行查，查完一个卡片就更新一个，不用等整轮）', 'info');
   } else if (!s.has_token) {
     showNotice('还没设置 GitHub 访问令牌：匿名额度只有 60 次/小时且按出口 IP 共享，'
       + '「检查更新」容易被限流。点右上角「设置」填一个令牌就稳了。', 'info');
@@ -702,6 +763,24 @@ function chipSmall(text) {
 }
 
 /* ── 动作 ── */
+/* 让「会等一会儿」的按钮有明确反馈：灰掉 + 转圈 + 顶栏写清在做什么。
+   实测这几个走 GitHub 的接口要 0.7~1.4 秒，原来只把按钮灰掉、没有任何文字与动效 ——
+   用户看到的就是「点了没反应，卡住了」。 */
+function busyOn(btn, what) {
+  if (btn) { btn.disabled = true; btn.classList.add('loading', 'spin'); }
+  const lbl = $('last-check');
+  if (lbl && what) lbl.textContent = what;
+}
+
+function busyOff(btn) {
+  if (btn) { btn.classList.remove('loading', 'spin'); btn.disabled = false; }
+  const lbl = $('last-check');
+  if (lbl) {
+    lbl.textContent = (state && state.last_check)
+      ? ('上次检查 ' + fmtTime(state.last_check)) : '尚未检查';
+  }
+}
+
 async function refresh() {
   state = await api('/api/state');
   render();
@@ -712,29 +791,29 @@ async function doCheck(btn) {
   // ⚠️ 不要用 innerHTML 替换按钮内容 —— 手机端 CSS 把按钮里的 span 隐藏了
   // （#check-btn span{display:none}），一替换就会出现"图标没了、文字也被隐藏"的空按钮。
   // 正确做法：保留图标与文字，只让它转圈 + 禁用，并把状态写到顶栏的时间文字上。
+  //
+  // 关键改动：**不再 await 整轮检查**。串行检查 6 个应用实测 6.1 秒，原来前端一直等到
+  // 全部跑完 —— 用户看到的就是「点一下卡六七秒、屏幕毫无变化」。现在服务端立刻返回、
+  // 检查在后台并行跑，进度与结果都由轮询（检查中 1 秒一次）补上。
   btn.disabled = true;
   btn.classList.add('loading');
-  const lbl = $('last-check');
-  const prev = lbl.textContent;
-  lbl.textContent = '正在检查…';
   try {
-    const r = await api('/api/check', { method: 'POST' });
-    state.apps = r.apps;
-    state.last_check = r.last_check;
-    render();
-    const n = (r.apps || []).filter((a) => a.update_available).length;
-    const errs = (r.apps || []).filter((a) => a.error).length;
-    if (n) toast('发现 ' + n + ' 个应用有新版本');
-    else if (errs) toast('检查完成，但有 ' + errs + ' 个应用出错', 'err');
-    else toast('全部已是最新', 'ok');
+    const r = await api('/api/check', { method: 'POST', body: {} });
+    if (r.apps) {                       // 节流命中：直接采用服务端返回的上次结果
+      state.apps = r.apps;
+      state.last_check = r.last_check;
+    }
+    if (r.checking) state.checking = r.checking;
+    if (r.throttled) toast('刚检查过，直接给你上次结果', '');
+    else if (r.started) toast('已开始检查，进度会实时刷新', '');
+    await refresh();
   } catch (e) {
-    lbl.textContent = prev;
     toast(e.message, 'err');
-  } finally {
-    btn.disabled = false;
-    btn.classList.remove('loading');
   }
+  // 按钮的禁用/转圈统一由 render() 按 state.checking.running 决定 ——
+  // 两处都管就会打架（这里开了、render 关了，或者反过来，按钮状态会闪）
 }
+
 
 /* 动作 → 接口（显式写出来，便于静态校验；也避免拼路径出错） */
 const ENDPOINT = {
@@ -776,7 +855,9 @@ function startPoll() {
     try {
       await refresh();
       const live = activeTasks();
-      const want = live.length ? 1000 : 10000;   // 有活儿 1s，空闲 10s
+      const ck = (state && state.checking) || {};
+      // 有活儿或正在检查 → 1s；空闲 → 10s
+      const want = (live.length || ck.running) ? 1000 : 10000;
       if (pollTimer && pollTimer.ms !== want) {
         clearInterval(pollTimer.id);
         pollTimer = { ms: want, id: setInterval(tick, want) };
@@ -1052,7 +1133,7 @@ $('app-add-btn').addEventListener('click', async () => {
   const raw = $('app-add-input').value.trim();
   if (!raw) { toast('请先填仓库地址或 fpk 直链', 'err'); return; }
   const btn = $('app-add-btn');
-  btn.disabled = true;
+  busyOn(btn, '正在读取仓库…');
   picker.editing = false;
   try {
     await loadOptions(raw);
@@ -1061,7 +1142,7 @@ $('app-add-btn').addEventListener('click', async () => {
     $('app-picker').classList.add('hidden');
     toast(e.message, 'err');
   } finally {
-    btn.disabled = false;
+    busyOff(btn);
   }
 });
 
@@ -1072,6 +1153,8 @@ $('app-preview-btn').addEventListener('click', async () => {
   const box = $('app-preview');
   box.classList.remove('hidden');
   box.textContent = '正在识别…';
+  const pbtn = $('app-preview-btn');
+  busyOn(pbtn, '正在识别安装包…');
   try {
     const r = await api('/api/apps/preview', {
       method: 'POST',
@@ -1095,13 +1178,15 @@ $('app-preview-btn').addEventListener('click', async () => {
     ].join('\n');
   } catch (e) {
     box.textContent = '✕ ' + e.message;
+  } finally {
+    busyOff(pbtn);
   }
 });
 
 $('app-confirm-btn').addEventListener('click', async () => {
   const p = currentPick();
   const btn = $('app-confirm-btn');
-  btn.disabled = true;
+  busyOn(btn, picker.editing ? '正在保存版本…' : '正在添加应用…');
   try {
     if (picker.editing) {
       await api('/api/apps/pin', {
@@ -1124,7 +1209,7 @@ $('app-confirm-btn').addEventListener('click', async () => {
   } catch (e) {
     toast(e.message, 'err');
   } finally {
-    btn.disabled = false;
+    busyOff(btn);
   }
 });
 

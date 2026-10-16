@@ -54,6 +54,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix="fpku-runtime-gate-")
     s = load(src, tmp)
     dl = os.path.join(tmp, "dl")
+    REAL_GH_RELEASES = s.gh_releases   # 后面的用例会把它换成桩，测缓存时要换回来
 
     # ── 1. 残留任务自愈 ──
     print("▸ 服务重启后的残留任务自愈")
@@ -138,7 +139,10 @@ def main():
     except Exception:                                 # noqa: BLE001
         chk(state["n"] == 1, "404 不重试（只请求 1 次）", state["n"])
     # find_release：空列表要给出「可重试」的说法，而不是含糊的「没有可用 Release」
-    s.gh_get = lambda url, retries=0: []
+    # 注意：列表路径现在走 gh_releases（带 15 秒缓存），要替的是它 ——
+    # 替 gh_get 会被缓存挡在前面（实测踩过：第一条用例把空列表缓存住，后面的用例全被它污染）
+    s._gh_cache.clear()
+    s.gh_releases = lambda repo: []
     try:
         s.find_release("owner/name", False, "")
         chk(False, "空列表应当报错")
@@ -146,12 +150,13 @@ def main():
         msg = str(exc)
         chk("重试" in msg and "瞬时" in msg, "空列表的错误提示带重试指引", msg[:70])
     # 有 Release 但都没 .fpk 附件：要说清三种「找不到」的区别
-    s.gh_get = lambda url, retries=0: [
+    s.gh_releases = lambda repo: [
         {"tag_name": "v1", "draft": True, "prerelease": False, "assets": []},
         {"tag_name": "v2", "draft": False, "prerelease": True, "assets": []},
         {"tag_name": "v3", "draft": False, "prerelease": False,
          "assets": [{"name": "readme.txt", "size": 1}]},
     ]
+    s._gh_cache.clear()
     try:
         s.find_release("owner/name", False, "")
         chk(False, "无 .fpk 附件应当报错")
@@ -181,6 +186,27 @@ def main():
     s.gh_get = _one
     r = s.find_release("owner/name", True, "v1.2.3")
     chk(r and r["tag"] == "v1.2.3", "指定 tag 能取到（预发布也允许，回滚是正经用途）")
+
+    # ── 2b. Release 列表短缓存 ──
+    print("▸ Release 列表短缓存（界面上的「获取版本 → 预览 → 添加」是一串操作）")
+    s._gh_cache.clear()
+    calls2 = []
+
+    def _fake_get(url, retries=0):
+        calls2.append(url)
+        return [{"tag_name": "v1", "draft": False, "prerelease": False,
+                 "assets": [{"name": "a.fpk", "size": 1}], "published_at": None, "body": ""}]
+
+    s.gh_releases = REAL_GH_RELEASES    # 换回真实现（前面几个用例把它替成桩了）
+    s.gh_get = _fake_get
+    s.gh_releases("o/cached")
+    s.gh_releases("o/cached")
+    chk(len(calls2) == 1,
+        "同一仓库十几秒内只打一次 GitHub（第 2 次命中缓存）", "上游调用 %d 次" % len(calls2))
+    s._gh_cache["o/cached"] = (time.time() - 9999, s._gh_cache["o/cached"][1])
+    s.gh_releases("o/cached")
+    chk(len(calls2) == 2, "缓存过期后会重新拉（不会一直吃旧数据）", "上游调用 %d 次" % len(calls2))
+    s._gh_cache.clear()
 
     # ── 3. 指定附件对不上时必须报错，不能静默换成别的包 ──
     print("▸ 指定的安装包对不上时不许静默替换")
@@ -357,6 +383,46 @@ def main():
         "4 个并发 /api/check 只真跑了一轮（共 %d 次 per-app 调用，期望 3）" % len(calls))
     chk(len(done) == 4, "每个请求都有返回（没有把别人晾着）",
         "done=%d errs=%s" % (len(done), errs_gate[:1]))
+    s.check_one = real_check_one
+
+    # ── 6c. 检测并行 + 进度 ──
+    print("▸ 检测并行与进度（串行 6 个应用实测 6.1 秒；并行应 ≈ 最慢的那个）")
+    apps6 = [{"repo": "o/n%d" % i, "appname": "p%d" % i} for i in range(6)]
+    s.load_whitelist = lambda: apps6
+
+    def _slow_check(a):
+        time.sleep(0.25)
+        return {"appname": a["appname"], "installed": "1.0", "latest": "1.0",
+                "update_available": False, "error": None, "sha256": "x" * 64,
+                "downloaded": None}
+
+    s.check_one = _slow_check
+    t0 = time.time()
+    res6 = s.run_check("parallel-probe")
+    el6 = time.time() - t0
+    chk(len(res6) == 6, "6 个应用都出了结果", len(res6))
+    chk(el6 < 0.6, "6 个各 0.25 秒的应用并行跑完（串行要 1.5 秒）", "%.2f 秒" % el6)
+    st6 = s.check_state()
+    chk(st6["done"] == 6 and st6["total"] == 6 and st6["running"] is False,
+        "进度字段正确收尾（done/total/running）", st6)
+    chk(st6["started_at"] and st6["finished_at"], "记录了起止时间（便于排障）")
+    s.check_one = real_check_one
+    s.load_whitelist = lambda: [{"repo": "o/n", "appname": "a%d" % i} for i in range(3)]
+
+    # ── 6d. 检查期间要有「在跑」的进度可读（界面靠它显示 x/y）──
+    print("▸ 检查期间的进度可观测")
+    seen = []
+    orig_slow = _slow_check
+
+    def _probe(a):
+        seen.append(s.check_state()["running"])
+        time.sleep(0.05)
+        return orig_slow(a)
+
+    s.check_one = _probe
+    s.run_check("progress-probe")
+    chk(seen and all(seen), "检查进行期间 running=True（界面才能显示进度）", seen)
+    chk(s.check_state()["running"] is False, "结束后 running 复位")
     s.check_one = real_check_one
 
     # ── 7. 自愈必须真的接在启动流程里（只定义不调用等于没修）──
