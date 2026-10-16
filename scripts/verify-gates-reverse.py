@@ -67,6 +67,8 @@ BREAKS = [
      "    if False:"),
     ("OPTIONS 预检不实现（退回 501）",
      "    def do_OPTIONS(self):", "    def do_OPTIONS_disabled(self):"),
+    ("有本地包也强制重新下载", "        if not known and _local_sha256_cached(cand) != rel[\"sha256\"]:",
+     "        if True:"),
     ("共享判定失效（重启后不再认「已装好」）",
      '    done = (_act in ("install", "update") and bool(_app and _tgt)',
      '    done = False and (_act in ("install", "update") and bool(_app and _tgt)'),

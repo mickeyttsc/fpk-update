@@ -348,33 +348,26 @@ function renderCard(app) {
 
   if (app.error) card.appendChild(el('div', 'c-err', app.error));
 
-  /* 按钮行 */
+  /* 按钮行：只留**一个**动作按钮。
+     用户要求：去掉「下载」「下载并更新」，只显示「更新」；点它时
+     **有已校验过的本地包就直接装、没有就先下载再装** —— 这个判断在后端做，不让用户选。
+     换版本回滚（钉了旧版本、没新版可升）时按钮显示为「安装」，走同一条路。 */
   const actions = el('div', 'c-actions');
-  // 已是最新就不给「下载 / 下载并更新」入口：包是用来升级的，没有升级可做就不该下（实测白下过 400MB）。
-  // 唯一例外：本地同名包内容核对不过（旧版本/没下完）→ 那是「修包」，得留出口。
   const upToDate = !!app.installed && !!app.latest
     && normVer(app.installed) === normVer(app.latest) && !app.update_available;
-  const needDownload = !upToDate || !!app.local_unknown
-    || !!(app.downloaded && app.downloaded.complete === false);
-  const canDownload = !!app.latest && !busy && needDownload;
-  const canInstall = !!(app.downloaded && app.downloaded.complete && !busy
-    && normVer(app.downloaded.version) !== normVer(app.installed));
-  const canUpdate = !!app.update_available && !busy;
-
-  const bDl = btn('下载', 'ghost sm', () => doAction(app, 'download', '下载'),
+  const localReady = !!(app.downloaded && app.downloaded.complete);
+  const brokenLocal = !!(app.downloaded && app.downloaded.complete === false);
+  const needAction = (!!app.latest && !upToDate) || brokenLocal
+    || (localReady && normVer(app.downloaded.version) !== normVer(app.installed))
+    || !!app.local_unknown;
+  const actLabel = app.update_available ? '更新' : '安装';
+  const bAct = btn(actLabel, 'primary sm', () => doAction(app, 'update', actLabel),
     !app.latest ? '暂无可用版本'
-      : (!needDownload ? '已是最新，无需下载（要留回滚包可在设置里「换版本」选旧版本）'
-                       : ('把 ' + app.latest + ' 的安装包下到本地（不改动应用）')));
-  const bIn = btn('安装', 'ghost sm', () => doAction(app, 'install', '安装'),
-    canInstall ? ('用已下载的 ' + app.downloaded.version + ' 安装（不重新下载）') : '需要先下载安装包');
-  const bUp = btn('下载并更新', 'primary sm', () => doAction(app, 'update', '下载并更新'),
-    canUpdate ? '下载最新版并立即升级' : '当前没有可更新的版本');
-  bDl.disabled = !canDownload;
-  bIn.disabled = !canInstall;
-  bUp.disabled = !canUpdate;
-  actions.appendChild(bDl);
-  actions.appendChild(bIn);
-  actions.appendChild(bUp);
+      : (!needAction ? '已是最新，无需操作'
+                     : (localReady ? ('用已下好的 ' + app.downloaded.version + ' 安装（不重复下载）')
+                                   : ('先下载 ' + app.latest + ' 再安装，一步完成'))));
+  bAct.disabled = !needAction || busy;
+  actions.appendChild(bAct);
   card.appendChild(actions);
 
   return card;
@@ -991,10 +984,15 @@ const CONFIRM = {
     okText: '安装',
   }),
   update: (a) => ({
-    title: '下载并更新「' + (a.display || a.appname) + '」',
+    title: (a.update_available ? '更新' : '安装') + '「' + (a.display || a.appname) + '」',
     rows: [[['版本', a.installed + ' → ' + a.latest]]],
-    notes: ['先下载并校验 sha256，然后升级。过程中该应用会短暂重启，数据不会丢失。'],
-    okText: '下载并更新',
+    notes: [
+      (a.downloaded && a.downloaded.complete)
+        ? ('本地已经有校验过的 ' + a.downloaded.version + ' 安装包，直接安装，不重复下载。')
+        : ('本地没有（或需要重取）安装包，会先下载 ' + a.latest + ' 并校验 sha256，然后安装。'),
+      '过程中该应用会短暂重启，数据不会丢失。',
+    ],
+    okText: a.update_available ? '更新' : '安装',
   }),
 };
 

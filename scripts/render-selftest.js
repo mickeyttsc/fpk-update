@@ -440,11 +440,11 @@ try {
   const okPct = width === '42%';
   const okMsg = joined.includes('分段下载中');
   const okPctOnce = (joined.match(/42%/g) || []).length === 1;
-  const allDisabled = btns.length === 3 && btns.every((b) => b.disabled === true);
+  const allDisabled = btns.length === 1 && btns[0].disabled === true;
   console.log(`  ${okPct ? '✔' : '✘'} 进度条宽度 = ${width}（期望 42%）`);
   console.log(`  ${okMsg ? '✔' : '✘'} 显示后端给的进度文案`);
   console.log(`  ${okPctOnce ? '✔' : '✘'} 百分比只出现一次（不重复表达同一件事）`);
-  console.log(`  ${allDisabled ? '✔' : '✘'} 进行中该应用的三个按钮全部禁用（${btns.length} 个按钮）`);
+  console.log(`  ${allDisabled ? '✔' : '✘'} 进行中该应用的按钮禁用（${btns.length} 个按钮）`);
   if (!(okPct && okMsg && okPctOnce && allDisabled)) bad++;
 
   console.log('▸ 排队中');
@@ -468,7 +468,7 @@ try {
   walk2(card2);
   const indet = bar2 && bar2.children[0] && bar2.children[0].classList.contains('indet');
   const okQueued = indet && t2.join(' | ').includes('排队中')
-    && btns2.length === 3 && btns2.every((b) => b.disabled === true);
+    && btns2.length === 1 && btns2[0].disabled === true;
   console.log(`  ${okQueued ? '✔' : '✘'} 排队中也显示进度块（不确定态），按钮同样禁用`);
   if (!okQueued) bad++;
 
@@ -493,9 +493,8 @@ try {
     (e.children || []).forEach(walk3);
   };
   walk3(card3);
-  const dlBtn = btns3.find((b) => b.textContent === '下载');
-  const upBtn = btns3.find((b) => b.textContent === '下载并更新');
-  const reEnabled = dlBtn && dlBtn.disabled === false && upBtn && upBtn.disabled === false;
+  const actBtn = btns3[0];
+  const reEnabled = btns3.length === 1 && actBtn && actBtn.disabled === false;
   console.log(`  ${reEnabled ? '✔' : '✘'} 任务结束后按钮恢复可点（不再被判为进行中）`);
   if (!reEnabled) bad++;
 
@@ -527,35 +526,42 @@ try {
     error: null, downloaded: { version: '1.0', complete: true }, local_unknown: null,
     notes: '', repo: 'o/n',
   }, over || {});
-  const btnsOf = (app) => {
+  const actBtns = (app) => {
     const card = sandbox.__renderCard(app);
-    const out = {};
+    const found = [];
     const walk = (e) => {
-      if (e.tagName === 'BUTTON') out[e.textContent] = e;
+      if (e.tagName === 'BUTTON') found.push(e);
       (e.children || []).forEach(walk);
     };
     walk(card);
-    return out;
+    return found;
   };
-  const up = btnsOf(mk());
-  const okUp = up['下载'].disabled === true && up['下载并更新'].disabled === true;
-  console.log(`  ${okUp ? '✔' : '✘'} 已是最新 → 「下载」「下载并更新」都禁用`);
+  const up = actBtns(mk());
+  const okUp = up.length === 1 && up[0].disabled === true;
+  console.log(`  ${okUp ? '✔' : '✘'} 已是最新 → 卡片上只有一个按钮且禁用`);
   if (!okUp) bad++;
 
-  const newer = btnsOf(mk({ latest: '1.1', update_available: true, relation: 'newer' }));
-  const okNew = newer['下载'].disabled === false && newer['下载并更新'].disabled === false;
-  console.log(`  ${okNew ? '✔' : '✘'} 有新版本 → 两个按钮都可点`);
+  const newer = actBtns(mk({ latest: '1.1', update_available: true, relation: 'newer' }));
+  const okNew = newer.length === 1 && newer[0].textContent === '更新' && newer[0].disabled === false;
+  console.log(`  ${okNew ? '✔' : '✘'} 有新版本 → 只显示一个「更新」按钮且可点  -> "${newer.map((b) => b.textContent).join('/')}"`);
   if (!okNew) bad++;
 
-  const bad2 = btnsOf(mk({ local_unknown: { name: 'a.fpk', size: 10, reason: '内容与 Release 不一致（可能是旧版本或没下完）' } }));
-  const okBad = bad2['下载'].disabled === false;
-  console.log(`  ${okBad ? '✔' : '✘'} 本地包核对不过 → 留出重下出口（可以点）`);
+  const bad2 = actBtns(mk({ local_unknown: { name: 'a.fpk', size: 10, reason: '内容与 Release 不一致（可能是旧版本或没下完）' } }));
+  const okBad = bad2.length === 1 && bad2[0].disabled === false;
+  console.log(`  ${okBad ? '✔' : '✘'} 本地包核对不过 → 留出重取出口（可以点）`);
   if (!okBad) bad++;
 
-  const inc = btnsOf(mk({ downloaded: { version: '1.0', complete: false } }));
-  const okInc = inc['下载'].disabled === false;
-  console.log(`  ${okInc ? '✔' : '✘'} 本地包不完整 → 也可以重下`);
+  const inc = actBtns(mk({ downloaded: { version: '1.0', complete: false } }));
+  const okInc = inc.length === 1 && inc[0].disabled === false;
+  console.log(`  ${okInc ? '✔' : '✘'} 本地包不完整 → 也可以重新取`);
   if (!okInc) bad++;
+
+  // 换版本回滚：钉了旧版本、没有新版可升 → 按钮变「安装」，仍可点
+  const rb = actBtns(mk({ latest: '0.9', update_available: false, relation: 'older',
+    downloaded: { version: '0.9', complete: true } }));
+  const okRb = rb.length === 1 && rb[0].textContent === '安装' && rb[0].disabled === false;
+  console.log(`  ${okRb ? '✔' : '✘'} 换回旧版本（回滚）→ 按钮显示「安装」且可点  -> "${rb.map((b) => b.textContent).join('/')}"`);
+  if (!okRb) bad++;
 } catch (e) {
   console.log('  ✘ 抛异常 -> ' + e.message);
   bad++;

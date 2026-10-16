@@ -83,7 +83,8 @@ def main():
         (js, "localUnknownRow", "界面如实说明同名外来文件"),
         (srv, "_local_sha256_cached", "本地包按内容（sha256）认领，而不是只看谁下载的"),
         (srv, "def download_needed", "已是最新就不下载（后端判定）"),
-        (js, "needDownload", "已是最新时界面也禁用「下载」"),
+        (srv, "def local_package_for", "有校验过的本地包就直接装（不重复下载）"),
+        (js, "actLabel", "卡片只留一个动作按钮（更新 / 安装）"),
         (srv, "clean_keep_current", "清理默认保留当前版本的包（回滚/修复用）"),
         (srv, "def do_OPTIONS", "显式应答 OPTIONS 预检（不再回 501 HTML）"),
         (srv, "升级过程中服务重启过", "自更新/升级中途重启的任务记为完成（不是失败）"),
@@ -91,7 +92,8 @@ def main():
         (js, "function notifyFinishedTasks", "任务完成单独弹通知"),
         (srv, "def judge_interrupted", "两条自愈路径共用同一判定（不再误报中断失败）"),
         (js, "selfUpdated", "自己升级自己后自动刷新界面"),
-        (js, "· ' + path + ')", "错误提示带上出错的接口路径（便于定位）"),
+        # 判据尽量不含标点：全角/半角括号最容易重打错（实测踩过两次）
+        (js, "+ path +", "错误提示带上出错的接口路径（便于定位）"),
         (srv, "include_current", "清理接口支持显式「连当前版本一起清」"),
         (js, "keep-current-input", "设置里有「清理时保留当前版本」开关"),
         (js, "function askDialog", "应用内确认弹窗（替掉原生 confirm）"),
@@ -120,6 +122,8 @@ def main():
     # 必须**不存在**的东西（改回去就是回归）
     ABSENT = [
         (js, "confirm(", "不要再调用浏览器原生 confirm（要用应用内 askDialog）"),
+        (js, "btn('下载并更新'", "不要再出现「下载并更新」按钮（合成一个「更新」）"),
+        (js, "btn('下载'", "不要再出现独立的「下载」按钮（点「更新」时自动按需下载）"),
     ]
     for text, needle, label in ABSENT:
         chk(needle not in text, label, "出现了：%s" % needle)

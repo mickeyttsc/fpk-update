@@ -571,6 +571,43 @@ def main():
     chk({x["id"]: x["status"] for x in s.list_tasks()}["tJ"] == "ok", "启动自愈与它一致")
     s.clear_finished_tasks()
 
+    # ── 6k. 单按钮「更新」：有校验过的本地包就不重复下载 ──
+    print("▸ 有校验过的本地包就不重复下载（卡片上只有一个「更新」按钮）")
+    dl4 = tempfile.mkdtemp(prefix="fpku-localpkg-")
+    s.save_settings({"download_dir": dl4})
+
+    def _make_fpk(path, appname, version):
+        """造一个**最小的合法 fpk**（tar.gz 里含 manifest）并返回其 sha256。"""
+        import tarfile as _tf, io as _io, gzip as _gz
+        mf = ("appname               = %s\nversion               = %s\n"
+              % (appname, version)).encode()
+        buf = _io.BytesIO()
+        with _tf.open(fileobj=buf, mode="w") as t:
+            info = _tf.TarInfo("manifest"); info.size = len(mf)
+            t.addfile(info, _io.BytesIO(mf))
+        data = _gz.compress(buf.getvalue())
+        with open(path, "wb") as f:
+            f.write(data)
+        return _hl.sha256(data).hexdigest()
+
+    good4 = os.path.join(dl4, "app-local.fpk")
+    sha4 = _make_fpk(good4, "installed-one", "9.9")
+    rel4 = {"appname": "installed-one", "version": "9.9", "asset_name": "app-local.fpk",
+            "sha256": sha4}
+    # 内容正确的包（台账里没有、不是本应用下载的）→ 也应被复用
+    path4, mf4 = s.local_package_for("installed-one", rel4)
+    chk(path4 == good4 and (mf4 or {}).get("version") == "9.9",
+        "内容一致 + 包内 manifest 对得上 → 复用（不再下载）", (path4, mf4))
+    _make_fpk(good4, "installed-one", "9.9")
+    with open(good4, "ab") as f:              # 追加一个字节 → 内容不再一致
+        f.write(b"X")
+    p4b, _ = s.local_package_for("installed-one", rel4)
+    chk(p4b is None, "内容不一致 → 不复用（会重新下载）", p4b)
+    chk(s.local_package_for("installed-one", {"appname": "x", "version": "1", "sha256": ""})[0] is None,
+        "来源没有摘要 → 一律不复用（无法核对内容）")
+    import shutil as _sh5
+    _sh5.rmtree(dl4, ignore_errors=True)
+
     # ── 7. 自愈必须真的接在启动流程里（只定义不调用等于没修）──
     print("▸ 启动流程接线")
     import ast

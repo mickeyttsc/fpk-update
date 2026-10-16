@@ -1993,6 +1993,35 @@ def _refresh_after_action():
         log(traceback.format_exc())
 
 
+def local_package_for(appname, rel):
+    """本地是否已有「就是这一版、且校验过」的安装包？返回 (路径, manifest) 或 (None, None)。
+
+    为什么要它：卡片上只有一个「更新」按钮，**「有包就装、没包才下」必须由后端判断**，
+    不能让用户去选。实测白下过 340MB；而带 sha256 的校验过的包照着用是安全的。
+
+    两条快慢路径：台账里记的就是这一版（快），否则直接比对内容（慢但正确）。
+    """
+    if not rel.get("sha256"):
+        return None, None
+    cand = os.path.join(download_dir(), rel.get("asset_name") or "")
+    if not os.path.isfile(cand):
+        return None, None
+    led = _load_registry().get(os.path.realpath(cand)) or {}
+    known = (led.get("sha256") == rel["sha256"][:16]
+             and norm_version(led.get("version") or "") == norm_version(rel["version"]))
+    try:
+        if not known and _local_sha256_cached(cand) != rel["sha256"]:
+            return None, None
+        mf = read_local_fpk_manifest(cand)
+        if (mf.get("appname") == appname
+                and norm_version(mf.get("version")) == norm_version(rel["version"])):
+            log("[%s] 复用本地已校验的包，跳过下载：%s" % (appname, cand))
+            return cand, mf
+    except Exception as exc:               # noqa: BLE001 - 本地包读不了就退回下载
+        log("[%s] 本地包不可用（%s），改为下载" % (appname, exc))
+    return None, None
+
+
 def do_update(tid, appname):
     """【下载并更新】：下载 → 校验 → 应用中心就地升级 → 核验。"""
     app = _resolve_app(appname)
@@ -2008,7 +2037,14 @@ def do_update(tid, appname):
                         message="已是最新版本（%s）" % cur, version=cur,
                         finished_at=now_iso())
             return
-        fpk_path, _total, _got, mf = _download_package(app, rel, tid)
+        # 本地已有「就是这一版、且校验过」的包 → 直接用它，不重复下载。
+        mf = None
+        fpk_path, mf = local_package_for(appname, rel)
+        if fpk_path:
+            update_task(tid, stage="downloaded", percent=100,
+                        message="本地已有校验过的 %s，直接安装（不重复下载）" % rel["version"])
+        else:
+            fpk_path, _total, _got, mf = _download_package(app, rel, tid)
         # 先把目标版本写进任务里：**自更新**（升级 fpk-update 自己）会在升级过程中被应用中心
         # 重启，进程没了、后面的代码不会执行 —— 重启后靠这个字段判断「到底装上了没」。
         update_task(tid, version=mf["version"], stage="installing",
