@@ -470,8 +470,10 @@ def device_arch():
 def _load_manifest_cache():
     global _manifest_cache
     if _manifest_cache is None:
-        d = load_json(MANIFEST_CACHE_FILE)
-        _manifest_cache = d if isinstance(d, dict) else {}
+        with _lock:
+            if _manifest_cache is None:
+                d = load_json(MANIFEST_CACHE_FILE)
+                _manifest_cache = d if isinstance(d, dict) else {}
     return _manifest_cache
 
 
@@ -673,10 +675,11 @@ def read_fpk_manifest(url, size_hint=None, max_bytes=768 * 1024, use_cache=True)
         raise RuntimeError("没能在安装包里找到 manifest（首/尾/整包都试过了）")
 
     info = _decode_manifest(body)
-    cache[key] = info
-    if len(cache) > 200:
-        for k in list(cache)[:100]:
-            cache.pop(k, None)
+    with _lock:
+        cache[key] = info
+        if len(cache) > 200:
+            for k in list(cache)[:100]:
+                cache.pop(k, None)
     _save_manifest_cache()
     return info
 
@@ -725,6 +728,8 @@ def _pick_asset(assets, want_arch=None, pattern=None, strict=False):
     """
     import fnmatch
     cands = list(assets)
+    if not cands:
+        raise RuntimeError("没有可供挑选的 .fpk 附件")
     if pattern:
         pat = str(pattern).strip()
         if any(ch in pat for ch in "*?["):
@@ -1346,26 +1351,36 @@ def _auto_download(results):
         dl = r.get("downloaded")
         if dl and dl.get("complete") and norm_version(dl.get("version") or "") == norm_version(r.get("latest") or ""):
             continue          # 这一版的包已经在本地了
-        # 退避：同一个应用 30 分钟内只自动试一次。
-        # 不加这道闸，一个下不动的包（网络/CDN 拒绝等）会每轮检测都重试一遍，没完没了。
+        # 退避：按「应用 + 目标版本」退避，同一个版本的失败包 30 分钟内只试一次。
+        # 为什么要带版本号：原来按应用退避，如果旧版本刚试过失败，5 分钟后作者发布了新修复版，
+        # 会被误挡 30 分钟。带版本后，新版本发布能第一时间自动下载，同一版本仍防打扰。
+        key = "%s@%s" % (r["appname"], r.get("latest") or "")
         try:
-            last = float(tried.get(r["appname"]) or 0)
+            last = float(tried.get(key) or tried.get(r["appname"]) or 0)
         except (TypeError, ValueError):
             last = 0
         if now - last < AUTO_DL_RETRY_SEC:
-            log("[auto] %s 上次自动下载在 %.0f 分钟前，本轮跳过（30 分钟内只试一次）"
-                % (r["appname"], (now - last) / 60))
+            log("[auto] %s（%s）上次自动下载在 %.0f 分钟前，本轮跳过（30 分钟内只试一次）"
+                % (r["appname"], r.get("latest"), (now - last) / 60))
             continue
         try:
             tid = enqueue(r["appname"], "download")
-            tried[r["appname"]] = now
+            tried[key] = now
             n += 1
             log("[auto] 有新版本，自动排入下载：%s %s → %s（任务 %s）"
                 % (r["appname"], r.get("installed"), r.get("latest"), tid))
         except Exception as exc:  # noqa: BLE001
             log("[auto] 自动下载排队失败 %s：%s" % (r["appname"], exc))
     if n:
-        save_json(AUTO_DL_STATE, tried)
+        # 清理 7 天前的过期退避记录，防止 auto-download.json 无限膨胀
+        pruned = {}
+        for k, ts in tried.items():
+            try:
+                if now - float(ts) < 7 * 86400:
+                    pruned[k] = ts
+            except (TypeError, ValueError):
+                pass
+        save_json(AUTO_DL_STATE, pruned if len(pruned) < len(tried) else tried)
         log("[auto] 本轮自动下载共排队 %d 个任务" % n)
 
 
@@ -2835,8 +2850,9 @@ class Handler(BaseHTTPRequestHandler):
             appname = path[len("/api/icon/"):].strip("/")
             if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", appname):
                 return self._err(400, "应用名非法")
-            # 只允许白名单内的应用，避免变成任意文件读取
-            if appname not in {a["appname"] for a in load_whitelist()}:
+            # 只允许白名单内的应用与本应用自身，避免变成任意文件读取
+            allowed = {a["appname"] for a in load_whitelist()} | {APP_NAME}
+            if appname not in allowed:
                 return self._err(404, "不在白名单内")
             p = icon_path(appname)
             if not p:

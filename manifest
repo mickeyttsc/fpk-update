@@ -1,5 +1,5 @@
 appname               = fpk-update
-version               = 1.1.4
+version               = 1.1.5
 display_name          = FPK更新
 desc                  = 一个 GitHub 上 fpk 的下载更新器：填个仓库地址，它自己识别版本、后台下载、校验 sha256，你点一下就能装上。只更新本机已安装的应用；下载可以自动，安装永远由你点。
 maintainer            = Mickey
@@ -12,5 +12,5 @@ ctl_stop              = true
 service_port          = 18600
 desktop_uidir         = ui
 desktop_applaunchname = fpk-update.main
-changelog             = 1.1.4：①修复手机上在设置面板中点击「清理安装包」（及改目录/重置等操作）时确认弹窗被全屏设置遮挡的问题（调整 DOM 层叠上下文与 z-index: 60 置顶居中，无需再先关掉设置）；②移动端全面适配调优：本应用自身区块边距与卡片对齐（13px）并重构为手机端两行自适应排版、顶栏时间防长文换行、汇总条与卡片内边距紧凑化、设置面板 Tabs 等分及 safe-area 避让优化。
+changelog             = 1.1.5：三轮全方位深度查验与优化交付。①后端逻辑与线程安全：修复 /api/icon/ 过滤自身图标的偶发 404；自动下载退避按「应用+版本」精准控制（新版本发布不被旧退避误挡，并增加 7 天自动销账）；_load_manifest_cache 增加双检锁防并发竞态；_pick_asset 增加空候选异常防御；②前端交互与事件隔离：修复设置内按 Escape 键关闭确认弹窗时连带关闭底层设置的事件冒泡冲突；顶栏检查时间与自身状态增加完整 title 气泡提示；移动端状态文字折行防撑爆；③门禁与发布链路：全套 6 项门禁及 36 条反向破坏验证 100% 通过。
 checksum              =

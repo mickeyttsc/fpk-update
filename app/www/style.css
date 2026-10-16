@@ -158,7 +158,7 @@ code {
   border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
 }
 .sb-name { font-size: 15px; }
-.sb-state { font-size: 13.5px; color: var(--fg-muted); }
+.sb-state { font-size: 13.5px; color: var(--fg-muted); word-break: break-word; }
 .sb-state.new { color: var(--accent); font-weight: 600; }
 .sb-state.bad { color: var(--err); }
 .sb-right { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
@@ -175,7 +175,7 @@ code {
   margin-left: 16px; margin-right: 16px;
 }
 @media (min-width: 1272px) { .summary { margin-left: auto; margin-right: auto; } }
-.summary .s-txt { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 500; }
+.summary .s-txt { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 500; word-break: break-word; }
 .summary .s-actions { display: flex; gap: 8px; flex: none; }
 
 /* ── 更新说明（对标应用商店的 changelog） ── */

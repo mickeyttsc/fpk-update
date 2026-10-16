@@ -472,10 +472,14 @@ function render() {
 
   /* 顶栏：检查中显示进度（x/y + 正在查哪个），检查完恢复「上次检查 时间」 */
   if (ck.running) {
-    $('last-check').textContent = '正在检查 ' + (ck.done || 0) + '/' + (ck.total || 0)
+    const t = '正在检查 ' + (ck.done || 0) + '/' + (ck.total || 0)
       + (ck.current ? '（' + ck.current + '）' : '') + '…';
+    $('last-check').textContent = t;
+    $('last-check').title = t;
   } else {
-    $('last-check').textContent = s.last_check ? ('上次检查 ' + fmtTime(s.last_check)) : '尚未检查';
+    const t = s.last_check ? ('上次检查 ' + fmtTime(s.last_check)) : '尚未检查';
+    $('last-check').textContent = t;
+    $('last-check').title = s.last_check ? new Date(s.last_check).toLocaleString() : '尚未检查';
   }
   const cbtn = $('check-btn');
   if (cbtn) {
@@ -658,15 +662,19 @@ function renderSelf(s) {
   if (running) {
     st.className = 'sb-state run';
     st.textContent = task.message || '处理中…';
+    st.title = task.message || '处理中…';
   } else if (it.error) {
     st.className = 'sb-state bad';
     st.textContent = it.error;
+    st.title = it.error;
   } else if (newer) {
     st.className = 'sb-state new';
     st.textContent = '有新版 ' + latest;
+    st.title = '当前 ' + now + ' → 最新 ' + latest;
   } else {
     st.className = 'sb-state';
     st.textContent = latest ? '已是最新' : '还没查过';
+    st.title = latest ? ('已安装 ' + now + '，已是最新版本') : '尚未检查';
   }
 
   /* 重新检测（只看它自己、绕过缓存）：检查中由顶栏统一显示进度，这里跟着禁用 */
@@ -1045,8 +1053,13 @@ function askDialog(opt) {
     const onNo = () => done(false);
     const onBg = (ev) => { if (ev.target === modal) done(false); };
     const onKey = (ev) => {
-      if (ev.key === 'Escape') done(false);
-      else if (ev.key === 'Enter' && document.activeElement !== $('cf-cancel')) done(true);
+      if (ev.key === 'Escape') {
+        if (ev.stopPropagation) ev.stopPropagation();
+        done(false);
+      } else if (ev.key === 'Enter' && document.activeElement !== $('cf-cancel')) {
+        if (ev.stopPropagation) ev.stopPropagation();
+        done(true);
+      }
     };
     function done(v) {
       modal.classList.add('hidden');
@@ -1160,7 +1173,12 @@ $('settings-modal').addEventListener('click', (ev) => {
   if (ev.target === $('settings-modal')) closeSettings();
 });
 document.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Escape') closeSettings();
+  if (ev.key === 'Escape') {
+    // 确认弹窗开着时，Escape 只取消上层确认弹窗，不关闭下层设置面板
+    const cf = $('confirm-modal');
+    if (cf && !cf.classList.contains('hidden')) return;
+    closeSettings();
+  }
 });
 $('log-btn').addEventListener('click', showLog);
 
