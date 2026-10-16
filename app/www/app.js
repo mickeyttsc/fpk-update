@@ -467,10 +467,9 @@ function render() {
 
   /* 设置里的只读信息 */
   $('wl-path').textContent = s.whitelist_file || '—';
-  // 本应用的版本：页脚一行 + 设置「运行信息」一行（同一件事在两处，是因为
-  // 页脚让人一眼看到「我在哪一版」，设置里是排障时看的地方）
+  // 本应用的版本：顶栏一个常驻小标签（一眼可见）+ 设置「运行信息」一行（排障时看）
   const av = s.app_version || '—';
-  $('app-ver').textContent = 'FPK更新 ' + av;
+  $('app-ver-chip').textContent = 'v' + av;
   $('app-ver-kv').textContent = av;
   $('auto-note').textContent = '每 ' + (s.check_interval_min || 60) + ' 分钟一次（只查版本，不会自动升级）';
   renderAppsList(s.whitelist || []);

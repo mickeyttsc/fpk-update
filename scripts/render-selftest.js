@@ -295,10 +295,10 @@ try {
   });
   sandbox.__render();
   // 版本号必须在页脚与设置里都渲染出来（之前界面上一个版本号都没有）
-  const foot = sandbox.__els('app-ver').textContent;
+  const chip = sandbox.__els('app-ver-chip').textContent;
   const kv = sandbox.__els('app-ver-kv').textContent;
-  const okVer = foot.includes('9.8.7') && kv === '9.8.7';
-  console.log(`  ${okVer ? '✔' : '✘'} 界面上显示本应用版本  -> 页脚 "${foot}" / 运行信息 "${kv}"`);
+  const okVer = chip === 'v9.8.7' && kv === '9.8.7';
+  console.log(`  ${okVer ? '✔' : '✘'} 界面上显示本应用版本  -> 顶栏 "${chip}" / 运行信息 "${kv}"`);
   if (!okVer) bad++;
   const onTxt = sandbox.__els('pkg-state').textContent;
   const onChk = sandbox.__els('auto-clean-input').checked;

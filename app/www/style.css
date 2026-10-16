@@ -477,3 +477,12 @@ code {
         gap: 10px; flex-wrap: wrap; }
 .foot #app-ver { flex: none; font-variant-numeric: tabular-nums; }
 @media (max-width: 700px) { .foot #app-ver { flex-basis: 100%; } }
+
+/* 顶栏版本号小标签（用主题变量，深浅色都不用另写一套） */
+.brand-row { display: flex; align-items: center; gap: 7px; }
+.ver-chip {
+  flex: none; font-size: 11px; line-height: 1.5; padding: 1px 7px;
+  border-radius: 999px; border: 1px solid var(--line);
+  background: var(--bg-soft); opacity: .8; font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

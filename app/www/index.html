@@ -18,7 +18,11 @@
          不在这里内联手写一份 —— 内联的那份迟早会和真正的图标长得不一样 -->
     <img class="brand-mark sm" src="/favicon.svg" alt="" width="34" height="34">
     <div class="brand-text">
-      <strong>FPK更新</strong>
+      <div class="brand-row">
+        <strong>FPK更新</strong>
+        <!-- 本应用自己的版本号：顶栏一直可见，一眼就能回答「我装的是哪一版」 -->
+        <span class="ver-chip" id="app-ver-chip">v—</span>
+      </div>
       <span class="muted" id="last-check">尚未检查</span>
     </div>
   </div>
@@ -60,7 +64,6 @@
 
 <footer class="foot">
   <span class="muted">升级走飞牛应用中心官方通道，保数据、不重装。被更新的应用会短暂重启。</span>
-  <span class="muted" id="app-ver">FPK更新 —</span>
 </footer>
 
 <!-- 设置：分页 -->
