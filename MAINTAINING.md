@@ -227,3 +227,19 @@ socket：`/var/run/com.trim.app.center.sock`（`root:root`，组 `OfficialAppUse
 ## 打包者
 
 Mickey · 本项目为自用打包。
+
+### 反向验证的锚点会漂移，必须定期重锚
+
+`verify-gates-reverse.py` 里的每条破坏都靠一段源码锚点定位。**改了那段代码，锚点就失效**，
+脚本会打印「? 跳过…锚点命中 0 次」并把它算作失败（skip 也算失败，不然「没测」会被当成「通过」）。
+加了 `force` 参数之后，「Release 列表不缓存」那条就漂了 —— 是这次跑出来的。
+另外判据要落在**行为**上而不是**文案**上：曾经用提示语「这是本应用自己」当判据，
+把条件改成 `if False:` 文案还在、守卫照样绿。
+
+### 冒烟测试千万别点「自身更新」
+
+本机跑一份临时实例做冒烟时（`FPKU_VAR` 指到临时目录）看起来是隔离的，但
+**应用中心 socket 是绝对路径** `/var/run/com.trim.app.center.sock` —— 一旦走到
+`upgrade_via_daemon`，它升的会是 NAS 上**真身**那一个。只读接口（`/api/state`、
+`/api/self/check`、`/api/apps/add`）随便点，`/api/self/update`、`/api/update`、
+`/api/install`、`/api/download` 在临时实例里**不要碰**。

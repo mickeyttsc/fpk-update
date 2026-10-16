@@ -140,6 +140,31 @@ code {
 .notice.info { background: var(--warn-bg); color: var(--warn); }
 .notice.error { background: var(--err-bg); color: var(--err); }
 
+/* ── 本应用自身（单独一块） ── */
+.selfbar {
+  max-width: 1240px; margin: 14px auto 0; padding: 11px 15px;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--bg-soft); box-shadow: var(--shadow);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+  margin-left: 16px; margin-right: 16px;
+}
+@media (min-width: 1272px) {
+  .selfbar { margin-left: auto; margin-right: auto; }
+}
+.sb-tag {
+  font-size: 11.5px; font-weight: 600; letter-spacing: .04em; padding: 2px 8px;
+  border-radius: 999px; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+}
+.sb-name { font-size: 15px; }
+.sb-state { font-size: 13.5px; color: var(--fg-muted); }
+.sb-state.new { color: var(--accent); font-weight: 600; }
+.sb-state.bad { color: var(--err); }
+.sb-right { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+.sb-extra { flex: 1 0 100%; }
+.sb-extra:empty { display: none; }
+
 /* ── 顶部汇总条 ── */
 .summary {
   max-width: 1240px; margin: 14px auto 0; padding: 11px 15px;

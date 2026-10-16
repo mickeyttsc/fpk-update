@@ -651,6 +651,112 @@ try {
   }
 
   console.log('────────────────────────────────────────');
+  console.log('────────────────────────────────────────');
+  console.log('▸ 本应用自身（列表上方独立一块，不混进被管理的列表）');
+  try {
+    const selfBase = () => ({
+      apps: [{ appname: 'aa', display: 'AA', has_icon: true, installed: '1.0', latest: '1.1',
+        update_available: true, relation: 'newer', size: 100, published_at: null,
+        error: null, downloaded: null, local_unknown: null, notes: '' }],
+      tasks: [], last_check: null, has_token: true, app_version: '1.1.2',
+      checking: { running: false, done: 0, total: 0, current: '' },
+      settings: { download_dir: '/v', concurrency: 4, mirror: '', auto_download: false,
+        auto_clean: true, theme: 'auto', self_repo: '' },
+      packages: { count: 0, size: 0, foreign_count: 0, foreign_size: 0,
+        parts_count: 0, parts_size: 0 },
+      whitelist: [], mirror_presets: [], default_download_dir: '/v',
+      self: null, self_repo: 'mickeyttsc/fpk-update',
+    });
+    const txt = (e) => {
+      const out = [];
+      (function w(n) { if (n.textContent) out.push(String(n.textContent)); (n.children || []).forEach(w); })(e);
+      return out.join(' | ');
+    };
+    const SELF_OK = { appname: 'fpk-update', display: 'FPK更新', installed: '1.1.2',
+      latest: '1.1.2', update_available: false, error: null, downloaded: null,
+      local_unknown: null, notes: '', self: true };
+    const SELF_NEW = Object.assign({}, SELF_OK, {
+      latest: '1.1.3', update_available: true, notes: '修了自更新误报中断' });
+    const bar = sandbox.__els('selfbar');
+
+    // ① 还没检测过 → 整块不出现（不留空壳）
+    let st = selfBase();
+    sandbox.__setState(st);
+    sandbox.__render();
+    const hide1 = bar.classList.contains('hidden');
+    console.log(`  ${hide1 ? '✔' : '✘'} 没有检测结果时整块隐藏（不留空壳）`);
+    if (!hide1) bad++;
+
+    // ② 已是最新 → 显示版本、状态「已是最新」、**不给**更新按钮
+    st = selfBase(); st.self = SELF_OK;
+    sandbox.__setState(st);
+    sandbox.__render();
+    const btn = sandbox.__els('sb-update');
+    const verTxt = sandbox.__els('sb-ver').textContent;
+    const stateTxt = sandbox.__els('sb-state').textContent;
+    const okLatest = !bar.classList.contains('hidden') && verTxt === 'v1.1.2'
+      && stateTxt.includes('已是最新') && btn.hidden === true;
+    console.log(`  ${okLatest ? '✔' : '✘'} 已是最新 → 记版本、「已是最新」、不给按钮`
+      + `  -> "${verTxt} / ${stateTxt} / hidden=${btn.hidden}"`);
+    if (!okLatest) bad++;
+
+    // ③ 有新版 → 一个「更新」按钮 + 更新说明
+    st = selfBase(); st.self = SELF_NEW;
+    sandbox.__setState(st);
+    sandbox.__render();
+    const barTxt = txt(sandbox.__els('sb-extra'));
+    // 按钮文案在 index.html 里（桩看不到静态 HTML），所以这里只查状态；
+    // 「按钮上写的是「更新」」由发布守卫按字符串查 HTML。
+    const okNewer = !btn.hidden && !btn.disabled
+      && sandbox.__els('sb-state').textContent.includes('有新版 1.1.3')
+      && barTxt.includes('更新说明') && barTxt.includes('修了自更新误报中断')
+      && sandbox.__els('sb-ver').textContent === 'v1.1.2';
+    console.log(`  ${okNewer ? '✔' : '✘'} 有新版 → 一个「更新」按钮 + 更新说明`
+      + `  -> "${sandbox.__els('sb-state').textContent} | ${barTxt.slice(0, 60)}"`);
+    if (!okNewer) bad++;
+
+    // ④ 更新进行中 → 进度可见、按钮禁用（不许连点）
+    st = selfBase(); st.self = SELF_NEW;
+    st.tasks = [{ id: 'ts', appname: 'fpk-update', action: 'update', status: 'running',
+      percent: 63, message: '正在升级（1.1.2 → 1.1.3）…' }];
+    sandbox.__setState(st);
+    sandbox.__render();
+    const runTxt = txt(sandbox.__els('sb-extra'));
+    const okRun = runTxt.includes('63%') && runTxt.includes('正在升级')
+      && btn.disabled === true
+      && sandbox.__els('sb-state').textContent.includes('正在升级');
+    console.log(`  ${okRun ? '✔' : '✘'} 进行中 → 进度 63% + 按钮禁用`
+      + `  -> "${sandbox.__els('sb-state').textContent} | ${runTxt.slice(0, 50)}"`);
+    if (!okRun) bad++;
+
+    // ⑤ 出错（限流等）→ 如实说，且不因为出错就把按钮画出来
+    st = selfBase();
+    st.self = Object.assign({}, SELF_NEW, { latest: null, update_available: false,
+      error: '检查失败：GitHub 限流' });
+    sandbox.__setState(st);
+    sandbox.__render();
+    const errTxt = sandbox.__els('sb-state').textContent;
+    const okErr = errTxt.includes('限流') && btn.hidden === true;
+    console.log(`  ${okErr ? '✔' : '✘'} 出错 → 状态行如实说  -> "${errTxt}"`);
+    if (!okErr) bad++;
+
+    // ⑥ 自身**不进列表**、也不计入汇总（「全部更新」只针对被管理的应用）
+    st = selfBase(); st.self = SELF_NEW;
+    sandbox.__setState(st);
+    sandbox.__render();
+    const cardN = sandbox.__els('cards').children.length;
+    const listTxt = txt(sandbox.__els('cards'));
+    const sumTxt = sandbox.__els('summary-txt').textContent;
+    const okSplit = cardN === 1 && !listTxt.includes('FPK更新')
+      && sumTxt.indexOf('1 个应用有新版本') === 0;
+    console.log(`  ${okSplit ? '✔' : '✘'} 自身不在列表里、也不计入汇总`
+      + `  -> 卡片 ${cardN} 张 / "${sumTxt}"`);
+    if (!okSplit) bad++;
+  } catch (e) {
+    bad++;
+    console.log(`  ✘ 本应用自身区块渲染抛异常：${e && e.message}`);
+  }
+
   console.log('▸ 应用内确认弹窗（替掉浏览器原生 confirm）');
   try {
     const p1 = sandbox.__askDialog({

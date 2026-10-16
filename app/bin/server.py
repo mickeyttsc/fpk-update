@@ -44,6 +44,13 @@ from urllib.parse import urlparse, parse_qs, quote
 # ───────────────────────────── 运行环境 ─────────────────────────────
 
 APP_NAME = "fpk-update"
+# 本应用自身的更新来源（**不在**「被管理的应用」列表里，单独一条链路）。
+# 为什么必须单独：它有三个别处没有的特殊性 ——
+#   ① 更新它 = 应用中心会重启本进程、页面上的 js/css 立刻过期（得自动刷新界面）；
+#   ② 「全部更新」绝不能带上它，否则队列里排在后面的应用会被连累着中断；
+#   ③ 它没有「本机已安装」这道门（自己当然装了），而列表里每条都要过这道门。
+# 仓库可在「设置 → 应用」里改，默认就是打包本应用的那个仓库。
+SELF_DEFAULT_REPO = os.environ.get("FPKU_SELF_REPO", "") or "mickeyttsc/fpk-update"
 
 HOST = os.environ.get("FPKU_HOST", "0.0.0.0")
 PORT = int(os.environ.get("FPKU_PORT", "18600"))
@@ -190,6 +197,11 @@ def load_whitelist():
             continue
         src = normalize_source(item)
         name = src["appname"]
+        # 自身更新不在被管理列表里（见 SELF_DEFAULT_REPO 的注释）。
+        # 这里兜底过滤：即使有人手工把那条记录写回 apps.json，也不会混进列表、
+        # 不会出现在「全部更新」里，更不会绕过下面的 /api/self 链路。
+        if name == APP_NAME or (src["repo"] or "").split("/")[-1] == APP_NAME:
+            continue
         if name and not APPNAME_RE.match(name):
             continue
         if not src["repo"] and not src["url"]:
@@ -371,7 +383,7 @@ def gh_get(url, retries=GH_RETRIES):
 
 
 
-def gh_releases(repo):
+def gh_releases(repo, force=False):
     """取一个仓库的 Release 列表，带 15 秒缓存。
 
     为什么加缓存：界面上的「获取版本 → 预览 → 添加」是一串操作，每一步原来都重新打
@@ -381,7 +393,9 @@ def gh_releases(repo):
     """
     now = time.time()
     hit = _gh_cache.get(repo)
-    if hit and now - hit[0] < GH_CACHE_TTL:
+    # force：绕过缓存。为什么需要 —— 刚发布一个版本、立刻点「检查更新」时，
+    # 15 秒内的旧列表会让界面坚持说「已是最新」，看起来像检测坏了。
+    if hit and not force and now - hit[0] < GH_CACHE_TTL:
         return hit[1]
     data = gh_get("https://api.github.com/repos/%s/releases?per_page=50" % repo)
     if not isinstance(data, list):
@@ -771,7 +785,55 @@ def normalize_source(entry):
     }
 
 
-def find_release(repo, allow_prerelease=False, want_tag=""):
+def self_source():
+    """本应用自身的更新来源（独立于被管理列表）。
+
+    形状故意和被管理条目一致 —— 检测/下载/升级这条链路上的每个函数都直接吃它，
+    所以「自身更新」复用的是同一套经过验证的代码，不是另写一份平行实现。
+    """
+    repo = str(load_settings().get("self_repo") or "").strip() or SELF_DEFAULT_REPO
+    m = re.match(r"^https?://github\.com/([^/]+)/([^/?#]+?)(?:\.git)?/?$", repo)
+    if m:
+        repo = "%s/%s" % (m.group(1), m.group(2))
+    if not REPO_RE.match(repo):
+        repo = SELF_DEFAULT_REPO
+    return {"appname": APP_NAME, "display": "FPK更新", "repo": repo, "url": "",
+            "tag": "", "asset": "", "allow_prerelease": False, "note": "",
+            "self": True}
+
+
+def migrate_self_entry():
+    """一次性把「把自己当普通应用加进列表」的旧记录迁走（非破坏）。
+
+    以前自身更新是实现成「把自己加进 apps.json 当普通应用」的，那是复用现成机制的
+    取巧做法，副作用是它会出现在列表里、还会被「全部更新」带上。现在整条链路独立了，
+    这条记录留着只会变成列表里一个多余且危险的条目 —— 所以启动时移出列表。
+    用户当时填的仓库不会丢：它会变成 self_repo 设置，照样生效。
+    """
+    with _lock:
+        doc = _whitelist_doc()
+        keep, moved = [], []
+        for item in (doc.get("apps") or []):
+            if not isinstance(item, dict):
+                continue
+            src = normalize_source(item)
+            if src["appname"] == APP_NAME or (src["repo"] or "").split("/")[-1] == APP_NAME:
+                moved.append(src["repo"])
+            else:
+                keep.append(item)
+        if not moved:
+            return False
+        doc["apps"] = keep
+        save_whitelist(doc)
+    repo = next((r for r in moved if r), "")
+    if repo and not load_settings().get("self_repo"):
+        save_settings({"self_repo": repo})
+    log("自身更新已独立：从被管理列表移出 %d 条自己%s（以后不参与「全部更新」）"
+        % (len(moved), ("，仓库沿用 %s" % repo) if repo else ""))
+    return True
+
+
+def find_release(repo, allow_prerelease=False, want_tag="", force=False):
     """找一个可用的 Release（不要求 tag 长得像版本号 —— 版本从 fpk 里读）。
 
     找不到时**要说清是哪一种「找不到」** —— 空列表、全是 draft/预发布、附件还没传完
@@ -794,7 +856,7 @@ def find_release(repo, allow_prerelease=False, want_tag=""):
             raise ValueError("GitHub 返回格式异常")
         data = [one]
     else:
-        data = gh_releases(repo)
+        data = gh_releases(repo, force=force)
     if not data:
         raise RuntimeError(
             "仓库 %s 这次读不到任何 Release —— 多半是 GitHub 侧瞬时抖动。"
@@ -904,7 +966,7 @@ def _version_from_tag(tag):
     return v if split_version(v) is not None else ""
 
 
-def resolve_source(entry):
+def resolve_source(entry, force=False):
     """解析一条配置 → 目标版本信息。
 
     版本优先取 **fpk 自身的 manifest**（权威，与 fnOS 安装时读的是同一份）；
@@ -925,7 +987,7 @@ def resolve_source(entry):
                "notes": "（直链来源，没有 sha256 摘要，出于安全不会下载/安装）"}
         sha, size = "", None
     else:
-        rel = find_release(src["repo"], src["allow_prerelease"], src["tag"])
+        rel = find_release(src["repo"], src["allow_prerelease"], src["tag"], force=force)
         if not rel:
             raise RuntimeError("仓库 %s 没有可用的 Release（含 .fpk 附件）" % src["repo"])
         # strict：用户显式指定了 asset 而名字对不上时直接报错。
@@ -1129,8 +1191,10 @@ def upgrade_via_daemon(fpk_path, appname, target_version, progress=None):
 
 # ───────────────────────────── 检测 ─────────────────────────────
 
-def check_one(app):
+def check_one(app, force=False):
     """查一个应用的最新版本（只读，不改任何东西）。
+
+    force：绕过 Release 列表的 15 秒缓存（自己刚发一版、马上点检查的场合）。
 
     通用性要点：**目标版本来自 fpk 自身的 manifest**，不是从 tag 猜的。
     所以仓库的 tag 怎么命名、附件叫什么名字都无所谓；appname 也可以留空自动识别。
@@ -1160,7 +1224,7 @@ def check_one(app):
         "sha256": "",
     }
     try:
-        rel = resolve_source(app)
+        rel = resolve_source(app, force=force)
     except urllib.error.HTTPError as exc:
         item["error"] = _gh_error_message(exc)
         return item
@@ -1305,7 +1369,7 @@ def _auto_download(results):
         log("[auto] 本轮自动下载共排队 %d 个任务" % n)
 
 
-def run_check(trigger="manual"):
+def run_check(trigger="manual", force=False):
     """跑一轮检测。
 
     带**并发闸门**：原来只有「距上次完成不足 10 秒就跳过」的时间节流，跑在中途的检查
@@ -1316,7 +1380,7 @@ def run_check(trigger="manual"):
         log("已有一轮检测在进行（%s），本次直接返回上次结果，不重复打 GitHub" % trigger)
         return cached_state().get("apps") or []
     try:
-        return _run_check_locked(trigger)
+        return _run_check_locked(trigger, force=force)
     finally:
         _check_lock.release()
 
@@ -1326,11 +1390,12 @@ def check_state():
         return dict(_check_state)
 
 
-def _run_check_locked(trigger):
-    apps = load_whitelist()
-    if not apps:
-        log("白名单为空，跳过检测")
-        return []
+def _run_check_locked(trigger, force=False):
+    managed = load_whitelist()
+    # 自身也一起查（省一轮 GitHub 往返），但结果**单独存**在 state["self"]：
+    # 它不属于「被管理的应用列表」，界面上下面的列表 + 上面单独一块。
+    apps = managed + [self_source()]
+    log("开始检测（%s）：%d 个被管理应用 + 本应用自身" % (trigger, len(managed)))
     log("开始检测（%s）：%d 个应用" % (trigger, len(apps)))
     with _lock:
         _check_state.update({"running": True, "done": 0, "total": len(apps),
@@ -1348,14 +1413,18 @@ def _run_check_locked(trigger):
         （HTTP Range 好几个请求），串行 6 个应用实测 6.1 秒。并行之后 ≈ 最慢的那个。
         """
         try:
-            results[i] = check_one(app)
+            r = check_one(app, force=force)
+            if app.get("self"):
+                r["self"] = True                      # 打标：结果要单独归到 state["self"]
+            results[i] = r
         except Exception as exc:                      # noqa: BLE001
             log("[%s] 检测异常：%s" % (app.get("appname") or app.get("repo"), exc))
             results[i] = {"appname": app.get("appname") or "", "display": app.get("display") or "",
                           "repo": app.get("repo"), "url": app.get("url"),
                           "installed": installed_version(app.get("appname") or "") if app.get("appname") else None,
                           "latest": None, "update_available": False, "downloaded": None,
-                          "local_unknown": None, "sha256": "", "error": "检查失败：%s" % exc}
+                          "local_unknown": None, "sha256": "", "self": bool(app.get("self")),
+                          "error": "检查失败：%s" % exc}
         with cnt_lock:
             cnt["done"] += 1
             done_n = cnt["done"]
@@ -1371,7 +1440,7 @@ def _run_check_locked(trigger):
     with _lock:
         _check_state.update({"running": False, "current": "",
                              "finished_at": datetime.now(CST).isoformat(timespec="seconds")})
-    log("检测完成：%d 个应用，用时 %.1f 秒" % (len(apps), time.time() - t0))
+    log("检测完成：%d 个应用（含本应用自身），用时 %.1f 秒" % (len(apps), time.time() - t0))
     for r in results:
         log("  %s: 已装=%s 最新=%s 可更新=%s%s"
             % (r["appname"], r["installed"], r["latest"],
@@ -1380,7 +1449,10 @@ def _run_check_locked(trigger):
         save_json(LAST_CHECK_FILE, {
             "at": datetime.now(CST).isoformat(timespec="seconds"),
             "trigger": trigger,
-            "apps": results,
+            # 自身单独一格：列表接口只回 apps，自身走 /api/state 的 self 字段。
+            # 「全部更新」按 apps 迭代，所以天然不会带上它。
+            "apps": [r for r in results if not r.get("self")],
+            "self": next((r for r in results if r.get("self")), None),
         })
     if load_settings().get("auto_download"):
         _auto_download(results)
@@ -1423,7 +1495,8 @@ def download_needed(item):
 def cached_state():
     data = load_json(LAST_CHECK_FILE)
     if not isinstance(data, dict):
-        return {"at": None, "trigger": None, "apps": []}
+        return {"at": None, "trigger": None, "apps": [], "self": None}
+    data.setdefault("self", None)          # 老状态文件没有这一格 → 补上空值
     return data
 
 
@@ -1869,8 +1942,16 @@ def download_urls(asset_url, st=None):
 # ── 动作实现（都在队列工作线程里跑） ──
 
 def _resolve_app(appname):
+    """appname → 配置条目（列表里的，或本应用自身）。"""
     apps = {a["appname"]: a for a in load_whitelist()}
-    return apps.get(appname)
+    if appname in apps:
+        return apps[appname]
+    # 自身更新不在列表里，但下载/安装/升级这条链路必须认它 ——
+    # 而且**跨版本过渡期**也得认：用户点更新那一刻，页面还是旧版的 JS，
+    # 它发的就是 /api/update?appname=fpk-update。拒掉会让升级卡死在半路。
+    if appname == APP_NAME:
+        return self_source()
+    return None
 
 
 def _task_progress(tid):
@@ -2186,10 +2267,19 @@ def load_settings():
     # 「一键清理」一次删掉 6 个包共 383MB（都是当前版本），要回滚就只能重新下载。
     # 旧版本 + 下载残留照清，不占用「清不掉」的借口。
     keep_current = data.get("clean_keep_current", True)
+    # 本应用自身的更新仓库（界面上方「本应用」区块用哪条来源）。
+    # 留空 = 用打包本应用的那个默认仓库（设置里能看到是哪个）。
+    self_repo = str(data.get("self_repo") or "").strip()
+    _m = re.match(r"^https?://github\.com/([^/]+)/([^/?#]+?)(?:\.git)?/?$", self_repo)
+    if _m:
+        self_repo = "%s/%s" % (_m.group(1), _m.group(2))
+    if self_repo and not REPO_RE.match(self_repo):
+        self_repo = ""
     return {"download_dir": dd, "concurrency": conc, "mirror": mir,
             "auto_download": bool(data.get("auto_download")),
             "auto_clean": bool(auto_clean),
             "clean_keep_current": bool(keep_current),
+            "self_repo": self_repo,
             "theme": th}
 
 
@@ -2787,6 +2877,10 @@ class Handler(BaseHTTPRequestHandler):
                 "last_check": st.get("at"),
                 "last_trigger": st.get("trigger"),
                 "apps": st.get("apps") or [],
+                # 本应用自身：单独一格（界面上是列表上方独立的一块）
+                "self": st.get("self"),
+                "self_repo": self_source()["repo"],
+                "self_default_repo": SELF_DEFAULT_REPO,
                 "tasks": tasks,
                 "job": current_task() or _last_task(tasks),
                 "check_interval_min": CHECK_INTERVAL_MIN,
@@ -2881,14 +2975,19 @@ class Handler(BaseHTTPRequestHandler):
                                    "checking": check_state()})
             # 立刻返回，检查在后台跑：实测串行 6 个应用要 6.1 秒，
             # 前端若是 await 到底，用户看到的就是「点一下卡六七秒、屏幕毫无变化」。
-            threading.Thread(target=run_check, args=("manual",), daemon=True).start()
+            # force：用户手动点的「检查更新」= 我要看到此刻的真相，
+            # 所以连 Release 列表的 15 秒缓存也一起绕过（改完配置/刚发版就用得上）。
+            threading.Thread(target=run_check, args=("manual",),
+                             kwargs={"force": True}, daemon=True).start()
             return self._json({"ok": True, "started": True, "running": True,
                                "checking": check_state()})
 
         if path in ("/api/download", "/api/install", "/api/update"):
             body = self._read_body()
             appname = str(body.get("appname") or "")
-            allowed = {a["appname"] for a in load_whitelist()}
+            # 自身不在列表里，但这条链路必须放行它（见 _resolve_app 的说明）：
+            # 用户点「更新」那一刻页面还是旧版 JS，发的就是这个接口。
+            allowed = {a["appname"] for a in load_whitelist()} | {APP_NAME}
             if appname not in allowed:
                 return self._err(400, "该应用不在列表里")
             action = path.rsplit("/", 1)[1]
@@ -2902,6 +3001,35 @@ class Handler(BaseHTTPRequestHandler):
                                          "下载" if action == "download" else "下载或更新"))
             try:
                 tid = enqueue(appname, action)
+            except ValueError as exc:
+                return self._err(400, str(exc))
+            return self._json({"ok": True, "task": tid, "message": "已加入队列"})
+
+        if path == "/api/self/check":
+            # 只重查自身：**绕缓存**（force）。为什么必须绕：用户刚给自己的应用发了一版，
+            # 回来点「检查」，而 Release 列表有 15 秒缓存 —— 不绕的话界面会坚持说
+            # 「已是最新」，看起来像坏了。
+            self._read_body()
+            if check_state()["running"]:
+                return self._json({"ok": True, "started": False, "running": True,
+                                   "checking": check_state()})
+            # 立刻返回、后台跑（与「检查更新」同一个理由：不能让界面卡着等网络）
+            threading.Thread(target=run_self_check, kwargs={"force": True}, daemon=True).start()
+            return self._json({"ok": True, "started": True, "running": True,
+                               "checking": check_state()})
+
+        if path == "/api/self/update":
+            # 自身更新的唯一入口。与列表里的应用走**同一套**队列/下载/校验/升级代码，
+            # 区别只有三点：目标固定是自己、跑完页面要自动刷新、不进「全部更新」。
+            self._read_body()
+            it = cached_state().get("self") or {}
+            if it.get("error"):
+                return self._err(409, "自身状态未知（%s），请先点「检查」再更新" % it["error"])
+            if not download_needed(it):
+                return self._err(409, "本应用已经是最新（%s），无需更新"
+                                      % (it.get("installed") or "?"))
+            try:
+                tid = enqueue(APP_NAME, "update")
             except ValueError as exc:
                 return self._err(400, str(exc))
             return self._json({"ok": True, "task": tid, "message": "已加入队列"})
@@ -3021,6 +3149,15 @@ class Handler(BaseHTTPRequestHandler):
                 if th not in THEME_CHOICES:
                     return self._err(400, "主题只能是 auto / light / dark")
                 new["theme"] = th
+            if "self_repo" in body:
+                rp = str(body.get("self_repo") or "").strip()
+                _m = re.match(r"^https?://github\.com/([^/]+)/([^/?#]+?)(?:\.git)?/?$", rp)
+                if _m:
+                    rp = "%s/%s" % (_m.group(1), _m.group(2))
+                if rp and not REPO_RE.match(rp):
+                    return self._err(400, "自身更新仓库要填 owner/name（或完整 GitHub 链接）；"
+                                          "留空 = 用默认的 %s" % SELF_DEFAULT_REPO)
+                new["self_repo"] = rp
             if new:
                 save_settings(new)
                 log("设置已更新：%s" % new)
@@ -3099,6 +3236,12 @@ class Handler(BaseHTTPRequestHandler):
             body = self._read_body()
             try:
                 raw, src, entry = _entry_from_request(body)
+                # 自身更新不进列表（它有独立的 /api/self 链路 + 独立区块）。
+                # 在这里就拦住，省掉一次没用的 GitHub 往返，也说清该去哪儿改它。
+                if (src["repo"] or "").split("/")[-1] == APP_NAME:
+                    return self._err(400, "这是本应用自己（%s）。自身更新在上方「本应用」区块里，"
+                                          "不用加进列表；要换仓库请去 设置 → 应用。"
+                                          % SELF_DEFAULT_REPO.split("/")[-1])
                 # 先在本地查重（亚毫秒），再谈联网识别 ——
                 # 重复添加原来会白跑一趟 GitHub（实测 914 毫秒）才告诉你「已经在列表里」。
                 _key = src["repo"] or src["url"]
@@ -3344,6 +3487,49 @@ def _recover_stale_tasks():
     return n
 
 
+def check_self(force=True):
+    """只重查本应用自身（结论写回 last-check.json 的 self 格，不动 apps）。"""
+    with _lock:
+        _check_state.update({"running": True, "done": 0, "total": 1, "current": APP_NAME,
+                             "trigger": "self",
+                             "started_at": datetime.now(CST).isoformat(timespec="seconds")})
+    app = self_source()
+    try:
+        r = check_one(app, force=force)
+        r["self"] = True
+    except Exception as exc:                          # noqa: BLE001
+        r = {"appname": APP_NAME, "display": "FPK更新", "note": "", "repo": app["repo"],
+             "url": "", "tag": "", "source": app["repo"], "has_icon": False,
+             "installed": installed_version(APP_NAME), "latest": None,
+             "update_available": False, "published_at": None, "notes": "",
+             "asset_name": None, "size": None, "downloaded": None,
+             "local_unknown": None, "detected_appname": None, "sha256": "",
+             "self": True, "error": "检查失败：%s" % exc}
+    with _lock:
+        st = cached_state()
+        if not isinstance(st, dict) or "apps" not in st:
+            st = {"at": now_iso(), "trigger": "self", "apps": []}
+        st["self"] = r
+        save_json(LAST_CHECK_FILE, st)
+        _check_state.update({"running": False, "current": "",
+                             "finished_at": datetime.now(CST).isoformat(timespec="seconds")})
+    log("自身检测完成：已装=%s 最新=%s 可更新=%s%s"
+        % (r["installed"], r["latest"], r["update_available"],
+           (" 错误=" + r["error"]) if r["error"] else ""))
+    return r
+
+
+def run_self_check(force=True):
+    """带闸门地跑一次自身检测（整轮检测正在跑时直接放弃：那一轮本来就会查自身）。"""
+    if not _check_lock.acquire(blocking=False):
+        log("已有一轮检测在进行，本次自身检测并入那一轮，不重复打 GitHub")
+        return None
+    try:
+        return check_self(force=force)
+    finally:
+        _check_lock.release()
+
+
 def main():
     global _worker_thread
     for d in (VAR_DIR, HOME_DIR, download_dir()):
@@ -3358,6 +3544,11 @@ def main():
     st = load_settings()
     log("下载目录=%s  分段并发=%d  加速镜像=%s"
         % (st["download_dir"], st["concurrency"], st["mirror"] or "直连"))
+    # 自身更新的旧记录（曾经把自己当普通应用加进列表）→ 移出列表、独立成上方的区块
+    try:
+        migrate_self_entry()
+    except Exception as exc:                          # noqa: BLE001
+        log("自身条目迁移失败（不影响其它功能）：%s" % exc)
     # 先自愈残留任务，再起 worker —— 顺序不能反，否则新 worker 可能先跑到别的任务上
     _recover_stale_tasks()
     _worker_thread = threading.Thread(target=worker_loop, name="dl-worker", daemon=True)

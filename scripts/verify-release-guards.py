@@ -114,6 +114,25 @@ def main():
         (js, "正在读取仓库", "「获取版本」有明确状态文字"),
         (js, "ck.running", "前端按检查状态决定轮询快慢与按钮转圈"),
         (js, "'正在检查 '", "顶栏显示「正在检查 x/y」"),
+        # ── 本应用自身：独立成一块（不进被管理列表、不进「全部更新」）──
+        (srv, "SELF_DEFAULT_REPO", "自身更新有独立来源常量（默认=打包本应用的仓库）"),
+        (srv, "def self_source", "自身来源单独解析（不来自被管理列表）"),
+        (srv, "def migrate_self_entry", "旧的「把自己当普通应用」记录会被移出列表"),
+        (srv, 'if name == APP_NAME or (src["repo"] or "").split("/")[-1] == APP_NAME:',
+         "读列表时兜底过滤掉自身（手工写回也不会混进来）"),
+        (srv, '"/api/self/update"', "自身更新走独立接口"),
+        (srv, '"/api/self/check"', "自身检测走独立接口（绕过 15 秒缓存）"),
+        (srv, '"apps": [r for r in results if not r.get("self")]',
+         "检测结果分格：apps 里没有自身"),
+        (srv, "if appname == APP_NAME:\n        return self_source()",
+         "动作链路认自身（跨版本过渡期页面发的就是 /api/update）"),
+        (srv, "def check_self", "只重查自身的实现"),
+        (srv, 'if (src["repo"] or "").split("/")[-1] == APP_NAME:',
+         "添加应用时拒绝把自身加进列表"),
+        (srv, "        migrate_self_entry()", "启动时真的会做那次迁移"),
+        (js, "function renderSelf", "界面把自身画成列表上方独立的一块"),
+        (js, "api('/api/self/update'", "自身更新按钮打的是自身接口（不是列表接口）"),
+        (js, "  renderSelf(s);", "render() 里真的画了那一块"),
     ]
     print("▸ 修复点必须还在（%d 项）" % len(REQUIRED))
     for text, needle, label in REQUIRED:
@@ -134,6 +153,15 @@ def main():
     if html:
         chk('id="confirm-modal"' in html and 'id="cf-ok"' in html,
             "页面里有确认弹窗骨架（#confirm-modal / #cf-ok）")
+        chk('id="selfbar"' in html and 'id="sb-update"' in html and 'id="sb-state"' in html,
+            "页面里有自身区块骨架（#selfbar / #sb-update / #sb-state）")
+        chk('id="self-repo-input"' in html,
+            "设置里能改自身更新来源（#self-repo-input）")
+        # 交付的默认列表里**不能**有本应用自己（等于把自己当普通应用管理）
+        apps_json = read(os.path.join(outer, "config", "apps.json")) or \
+            read(os.path.join(app, "..", "config", "apps.json"))
+        chk("fpk-update" not in apps_json,
+            "内置默认列表里没有本应用自己（自身更新走独立链路）")
 
     # 密码类残留：wizard/ 与 cmd/ 都不许出现肯定式「密码」表述
     hits = []

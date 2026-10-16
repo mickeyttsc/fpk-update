@@ -55,6 +55,7 @@ def main():
     s = load(src, tmp)
     dl = os.path.join(tmp, "dl")
     REAL_GH_RELEASES = s.gh_releases   # 后面的用例会把它换成桩，测缓存时要换回来
+    REAL_LOAD_WL = s.load_whitelist     # 同上：有些用例把列表也换成了桩，用完要换回来
 
     # ── 1. 残留任务自愈 ──
     print("▸ 服务重启后的残留任务自愈")
@@ -142,7 +143,7 @@ def main():
     # 注意：列表路径现在走 gh_releases（带 15 秒缓存），要替的是它 ——
     # 替 gh_get 会被缓存挡在前面（实测踩过：第一条用例把空列表缓存住，后面的用例全被它污染）
     s._gh_cache.clear()
-    s.gh_releases = lambda repo: []
+    s.gh_releases = lambda repo, force=False: []
     try:
         s.find_release("owner/name", False, "")
         chk(False, "空列表应当报错")
@@ -150,7 +151,7 @@ def main():
         msg = str(exc)
         chk("重试" in msg and "瞬时" in msg, "空列表的错误提示带重试指引", msg[:70])
     # 有 Release 但都没 .fpk 附件：要说清三种「找不到」的区别
-    s.gh_releases = lambda repo: [
+    s.gh_releases = lambda repo, force=False: [
         {"tag_name": "v1", "draft": True, "prerelease": False, "assets": []},
         {"tag_name": "v2", "draft": False, "prerelease": True, "assets": []},
         {"tag_name": "v3", "draft": False, "prerelease": False,
@@ -354,7 +355,7 @@ def main():
     print("▸ 检测的并发闸门")
     calls = []
     real_check_one = s.check_one
-    def _slow_check(a):
+    def _slow_check(a, force=False):
         # 必须让每轮检测有实际耗时：否则 4 个线程会「一个接一个」瞬间跑完，
         # 根本不会重叠 —— 那样测出来的绿是假的（我第一版就是这么写的）。
         calls.append(a.get("appname"))
@@ -379,8 +380,9 @@ def main():
     ths = [threading.Thread(target=_rc) for _ in range(4)]
     [t.start() for t in ths]
     [t.join() for t in ths]
-    chk(len(calls) == 3,
-        "4 个并发 /api/check 只真跑了一轮（共 %d 次 per-app 调用，期望 3）" % len(calls))
+    chk(len(calls) == 4,
+        "4 个并发 /api/check 只真跑了一轮（共 %d 次 per-app 调用，期望 3 个被管理 + 自身 1）"
+        % len(calls))
     chk(len(done) == 4, "每个请求都有返回（没有把别人晾着）",
         "done=%d errs=%s" % (len(done), errs_gate[:1]))
     s.check_one = real_check_one
@@ -390,7 +392,7 @@ def main():
     apps6 = [{"repo": "o/n%d" % i, "appname": "p%d" % i} for i in range(6)]
     s.load_whitelist = lambda: apps6
 
-    def _slow_check(a):
+    def _slow_check(a, force=False):
         time.sleep(0.25)
         return {"appname": a["appname"], "installed": "1.0", "latest": "1.0",
                 "update_available": False, "error": None, "sha256": "x" * 64,
@@ -400,10 +402,13 @@ def main():
     t0 = time.time()
     res6 = s.run_check("parallel-probe")
     el6 = time.time() - t0
-    chk(len(res6) == 6, "6 个应用都出了结果", len(res6))
+    self_n = sum(1 for r in res6 if r.get("self"))
+    chk(len(res6) == 7 and self_n == 1,
+        "6 个被管理应用 + 本应用自身都出了结果（自身单独打标）",
+        "%d 条，self 标 %d 条" % (len(res6), self_n))
     chk(el6 < 0.6, "6 个各 0.25 秒的应用并行跑完（串行要 1.5 秒）", "%.2f 秒" % el6)
     st6 = s.check_state()
-    chk(st6["done"] == 6 and st6["total"] == 6 and st6["running"] is False,
+    chk(st6["done"] == 7 and st6["total"] == 7 and st6["running"] is False,
         "进度字段正确收尾（done/total/running）", st6)
     chk(st6["started_at"] and st6["finished_at"], "记录了起止时间（便于排障）")
     s.check_one = real_check_one
@@ -414,7 +419,7 @@ def main():
     seen = []
     orig_slow = _slow_check
 
-    def _probe(a):
+    def _probe(a, force=False):
         seen.append(s.check_state()["running"])
         time.sleep(0.05)
         return orig_slow(a)
@@ -439,7 +444,7 @@ def main():
            "display_name": "X", "platform": "all", "tag": "v9.9", "asset_name": "app-a.fpk",
            "asset_url": "http://x/a.fpk", "sha256": _hl.sha256(real).hexdigest(),
            "size": len(real), "published_at": None, "notes": "", "source_kind": "repo"}
-    s.resolve_source = lambda entry: rel
+    s.resolve_source = lambda entry, force=False: rel
     s.installed_version = lambda n: "9.0"
     s.installed_display = lambda n: "Installed One"
     s.device_arch = lambda: "x86"
@@ -469,6 +474,52 @@ def main():
         item3.get("local_unknown"))
     import shutil as _sh2
     _sh2.rmtree(dl2, ignore_errors=True)
+
+    # ── 6g. 本应用自身：独立成一块（不进列表、不进「全部更新」）──
+    print("▸ 本应用自身独立成块（不进列表、不进「全部更新」、跨版本过渡期仍认它）")
+    s.load_whitelist = REAL_LOAD_WL     # 前面几节把列表换成了桩，这一节要测真的过滤逻辑
+    with open(os.environ["FPKU_APPS_USER"], "w", encoding="utf-8") as f:
+        json.dump({"apps": [
+            {"appname": "cliproxyapi", "repo": "mickeyttsc/cliproxyapi-fpk"},
+            {"appname": "fpk-update", "repo": "mickeyttsc/fpk-update"},   # 自己（写了 appname）
+            {"appname": "", "repo": "someone/fpk-update"},                # 自己（只按仓库名认）
+        ]}, f)
+    chk(s.migrate_self_entry() is True, "迁移：把「把自己当普通应用」的旧记录移出列表")
+    wl = s.load_whitelist()
+    chk([a["appname"] for a in wl] == ["cliproxyapi"],
+        "列表里不再有自身（只剩别的应用）", [a["appname"] for a in wl])
+    chk(s.load_settings().get("self_repo") == "mickeyttsc/fpk-update",
+        "移出时把它填的仓库记成 self_repo（用户当时填的地址不丢）",
+        s.load_settings().get("self_repo"))
+
+    with open(os.environ["FPKU_APPS_USER"], "w", encoding="utf-8") as f:
+        json.dump({"apps": [{"appname": "fpk-update", "repo": "mickeyttsc/fpk-update"}]}, f)
+    chk(s.load_whitelist() == [], "手工写回列表也不会混进来（load_whitelist 兜底过滤）")
+
+    s.save_settings({"self_repo": "https://github.com/someone/fpk-update"})
+    _sf = s.self_source()
+    chk(_sf["appname"] == "fpk-update" and _sf["repo"] == "someone/fpk-update",
+        "self_source：接受完整链接、归一化成 owner/name", _sf)
+    chk(s._resolve_app("fpk-update") is not None,
+        "动作链路认自身（跨版本过渡期页面发的就是 /api/update?appname=fpk-update）")
+    chk(s._resolve_app("不存在的应用") is None, "其它不存在的 appname 仍然拒绝")
+    s.save_settings({"self_repo": ""})
+    chk(s.self_source()["repo"] == s.SELF_DEFAULT_REPO,
+        "留空 → 回到内置默认仓库", s.SELF_DEFAULT_REPO)
+
+    with open(os.environ["FPKU_APPS_USER"], "w", encoding="utf-8") as f:
+        json.dump({"apps": [{"repo": "o/n", "appname": "a0"}]}, f)
+    s.check_one = lambda a, force=False: {
+        "appname": a["appname"], "installed": "1.0", "latest": "1.0",
+        "update_available": False, "error": None, "sha256": "x" * 64, "downloaded": None}
+    s.run_check("split-probe")
+    _st = s.cached_state()
+    chk(all(not r.get("self") for r in _st["apps"]), "检测结果 apps 里没有自身",
+        [r.get("appname") for r in _st["apps"]])
+    chk((_st.get("self") or {}).get("appname") == "fpk-update",
+        '自身结果单独放在 state["self"]（界面据此画独立区块）', _st.get("self"))
+    chk((_st.get("self") or {}).get("self") is True, "自身那条带 self 标")
+    s.check_one = real_check_one
 
     # ── 6f. 「已是最新就不下载」──
     print("▸ 已是最新就不下载（实测白下过 400MB）")

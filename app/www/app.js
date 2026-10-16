@@ -561,7 +561,12 @@ function render() {
     });
   }
 
-  /* 顶部汇总：有几个可更新 + 一键全部更新（对标手机应用商店） */
+  /* 本应用自身：列表上方独立一块（列表里全是「别的应用」） */
+  renderSelf(s);
+
+  /* 顶部汇总：有几个可更新 + 一键全部更新（对标手机应用商店）。
+     注意：这里只数 apps（被管理的应用）—— 自身更新不在里面，
+     所以「全部更新」天然不会带上自己。 */
   renderSummary(s);
 
   /* 顶部：进行中的任务（含排队），后台跑，关掉页面也不影响 */
@@ -620,6 +625,99 @@ function render() {
     });
   }
   fillMirrorSelect(st.mirror || '', s.mirror_presets || []);
+  // 自身更新用哪条来源（留空 = 内置默认）
+  syncInput('self-repo-input', st.self_repo || s.self_default_repo || '');
+  $('self-repo-kv').textContent = (s.self_repo || s.self_default_repo || '—')
+    + (s.self_repo ? '' : '（内置默认）');
+}
+
+/* ── 本应用自身（**单独一块**，不混进被管理的列表） ──
+   为什么必须单独：更新它是「自己更新自己」—— 应用中心会重启本进程，页面上的
+   js/css 立刻过期（见 render() 里的自动刷新）；「全部更新」绝不能带上它，否则
+   队列里排在后面的应用会被连累着中断；它也没有「本机已安装」那道门（自己当然装了）。
+   服务端把它的检测结果单独放在 state.self 里，这里只负责画。 */
+function renderSelf(s) {
+  const box = $('selfbar');
+  if (!box) return;
+  const it = s.self;
+  if (!it) { box.classList.add('hidden'); return; }   // 还没检测过：这一块先不出现
+  box.classList.remove('hidden');
+
+  const task = taskFor(it.appname);
+  const running = !!(task && (task.status === 'running' || task.status === 'queued'));
+  const finished = !!(task && !running);
+  const now = s.app_version || it.installed || '';
+  const latest = it.latest || '';
+  const newer = !!it.update_available;
+
+  $('sb-name').textContent = it.display || '本应用';
+  $('sb-ver').textContent = 'v' + (now || '—');
+
+  /* 状态文字：一次只说一件事（进行中 > 出错 > 有新版 > 已是最新） */
+  const st = $('sb-state');
+  if (running) {
+    st.className = 'sb-state run';
+    st.textContent = task.message || '处理中…';
+  } else if (it.error) {
+    st.className = 'sb-state bad';
+    st.textContent = it.error;
+  } else if (newer) {
+    st.className = 'sb-state new';
+    st.textContent = '有新版 ' + latest;
+  } else {
+    st.className = 'sb-state';
+    st.textContent = latest ? '已是最新' : '还没查过';
+  }
+
+  /* 重新检测（只看它自己、绕过缓存）：检查中由顶栏统一显示进度，这里跟着禁用 */
+  const ckRunning = !!(s.checking && s.checking.running);
+  const bck = $('sb-check');
+  if (bck) {
+    bck.disabled = running || ckRunning;
+    bck.classList.toggle('loading', ckRunning);
+  }
+
+  /* 动作按钮：只有真的能更新时才出现 —— 摆在那儿却不能点，比不出现更让人困惑 */
+  const b = $('sb-update');
+  if (b) {
+    b.hidden = !newer;
+    b.disabled = running || !newer;
+    b.title = newer ? ('更新到 ' + latest + '（会重启本应用，装完页面自动刷新）') : '';
+  }
+
+  /* 附加区：进度 / 失败结果条（可重试）/ 更新说明，一次一件 */
+  const ex = $('sb-extra');
+  if (ex) {
+    ex.textContent = '';
+    if (running) {
+      ex.appendChild(progressBlock(task, 'run'));
+    } else if (finished && task.status !== 'ok') {
+      ex.appendChild(resultStrip(task, it));
+    } else if (newer && it.notes) {
+      const d = el('details', 'c-notes');
+      d.appendChild(el('summary', '', '更新说明'));
+      d.appendChild(el('div', 'c-notes-body', it.notes));
+      ex.appendChild(d);
+    }
+  }
+}
+
+async function doSelfUpdate() {
+  const it = (state && state.self) || {};
+  const conf = CONFIRM.update(it);
+  conf.title = '更新「本应用」（FPK更新）到 ' + (it.latest || '新版');
+  conf.notes = conf.notes.concat([
+    '这是「自己更新自己」：装完飞牛应用中心会重启本应用，页面会自动刷新一次，中途短暂打不开是正常的。',
+  ]);
+  if (!(await askDialog(conf))) return;
+  try {
+    const r = await api('/api/self/update', { method: 'POST', body: {} });
+    toast(r.message || '已加入后台队列，可以关掉页面');
+    await refresh();
+    startPoll();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
 }
 
 /* ── 顶部汇总条 + 全部更新 ── */
@@ -1418,6 +1516,30 @@ $('apps-reset').addEventListener('click', async () => {
     toast('已恢复默认列表', 'ok');
     await refresh();
     doCheck($('check-btn'));
+  } catch (e) { toast(e.message, 'err'); }
+});
+
+/* ── 本应用自身 ── */
+$('sb-update').addEventListener('click', doSelfUpdate);
+
+$('sb-check').addEventListener('click', async () => {
+  // 只看自己：服务端会绕过 Release 列表的 15 秒缓存，刚发一版立刻就能看到
+  try {
+    await api('/api/self/check', { method: 'POST', body: {} });
+    await refresh();
+    startPoll();
+  } catch (e) { toast(e.message, 'err'); }
+});
+
+$('self-repo-save').addEventListener('click', async () => {
+  try {
+    const r = await api('/api/settings', {
+      method: 'POST', body: { self_repo: $('self-repo-input').value.trim() },
+    });
+    toast('自身更新来源已改为 ' + (r.settings.self_repo || '内置默认'), 'ok');
+    await refresh();
+    try { await api('/api/self/check', { method: 'POST', body: {} }); await refresh(); startPoll(); }
+    catch (e) { /* 立刻重查失败不影响设置已保存 */ }
   } catch (e) { toast(e.message, 'err'); }
 });
 

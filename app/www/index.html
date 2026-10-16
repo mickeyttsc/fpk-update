@@ -51,6 +51,25 @@
 
 <div class="notice hidden" id="notice"></div>
 
+<!-- 本应用自身的更新：**单独一块**，不混进下面「被管理的应用」列表。
+     为什么不混：更新它会重启本进程（页面上的 js/css 立刻过期，得自动刷新界面）；
+     「全部更新」绝不能带上它（否则队列里后面的应用会被连累着中断）；
+     它也没有「本机已安装」那道门（自己当然装了）。三点都和列表里的条目不一样。 -->
+<section class="selfbar hidden" id="selfbar">
+  <span class="sb-tag">本应用</span>
+  <strong class="sb-name" id="sb-name">FPK更新</strong>
+  <span class="ver-chip" id="sb-ver">v—</span>
+  <span class="sb-state" id="sb-state">—</span>
+  <span class="sb-right">
+    <button class="btn ghost icon-only" id="sb-check" aria-label="重新检测本应用"
+            title="只看本应用自己的最新版本（会绕过 15 秒缓存）">
+      <svg viewBox="0 0 24 24" class="ico" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="btn primary sm" id="sb-update" hidden>更新</button>
+  </span>
+  <div class="sb-extra" id="sb-extra"></div>
+</section>
+
 <!-- 顶部汇总条（对标手机应用商店）：有几个可更新 + 一键全部更新 -->
 <div class="summary hidden" id="summary">
   <span class="s-txt" id="summary-txt">—</span>
@@ -106,6 +125,10 @@
           （读 fpk 自身的 manifest，所以任何仓库都能用，不需要改仓库，也不需要重装本应用）。
           也可以填 <b>fpk 直链</b>。
         </p>
+        <p class="set-hint">
+          <b>本应用自己（FPK更新）不在这里</b> —— 它在上方独立的「本应用」区块里更新。
+          「全部更新」也不会带上它（更新自己会重启本应用，会把队列里后面的应用一起打断）。
+        </p>
         <div class="applist" id="apps-list"></div>
         <div class="row">
           <input type="text" id="app-add-input" placeholder="owner/name 或 https://github.com/owner/name"
@@ -136,6 +159,16 @@
 
         <div class="row">
           <button class="btn ghost" id="apps-reset">恢复默认列表</button>
+        </div>
+
+        <h4>本应用自己</h4>
+        <p class="set-hint">
+          自身更新用哪条来源。留空 = 用内置默认（打包本应用的那个仓库）。改完会自动重查一次。
+        </p>
+        <div class="row">
+          <input type="text" id="self-repo-input" placeholder="owner/name（留空 = 内置默认）"
+                 spellcheck="false" autocomplete="off">
+          <button class="btn primary" id="self-repo-save">保存</button>
         </div>
       </section>
 
@@ -262,6 +295,7 @@
         <div class="kv"><span>列表文件</span><code id="wl-path">—</code></div>
         <div class="kv"><span>自动检测</span><span class="muted" id="auto-note">—</span></div>
         <div class="kv"><span>本应用版本</span><code id="app-ver-kv">—</code></div>
+        <div class="kv"><span>自身更新来源</span><code id="self-repo-kv">—</code></div>
         <div class="row">
           <button class="btn ghost" id="log-btn">查看日志</button>
         </div>
