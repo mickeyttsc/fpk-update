@@ -1,5 +1,5 @@
 appname               = fpk-update
-version               = 1.1.6
+version               = 1.1.7
 display_name          = FPK更新
 desc                  = 一个 GitHub 上 fpk 的下载更新器：填个仓库地址，它自己识别版本、后台下载、校验 sha256，你点一下就能装上。只更新本机已安装的应用；下载可以自动，安装永远由你点。
 maintainer            = Mickey
@@ -12,5 +12,5 @@ ctl_stop              = true
 service_port          = 18600
 desktop_uidir         = ui
 desktop_applaunchname = fpk-update.main
-changelog             = 1.1.6：移动端顶部两模块布局深度优化。①消除重复冗余：手机端自身区块（.selfbar）隐藏重复的应用名、版本号与重复刷新按钮，与顶栏信息形成优雅互补（「本应用 · 已是最新」精简通透，不抢占高度）；②修复幽灵更新按钮：强化 [hidden] 属性的 CSS 优先级（覆盖 .btn 的 display），最新状态下更新按钮彻底隐藏不留残影；③顶栏动作按钮触控优化：三个功能按钮统一定制为 36×36 正方圆角触控块，对齐更规整；④卡片动作文案优化：已是最新状态的卡片动作按钮文案统一改为「已是最新」，不再显示令人困惑的禁用态「安装」。
+changelog             = 1.1.7：彻底封堵「已是最新版本仍会下载」及自身安装包残留问题。①严禁已是最新时下载：do_download 与 _auto_download 增加版本一致硬拦截（当前已装版本 == 目标版本时直接 exit，绝不从 GitHub 重复下载）；②自动下载安全边界：_auto_download 彻底排除本应用自身（自身更新仅由用户在顶栏手动点击），且设置默认 auto_download 为 false；③自身更新重启自动销账：自更新过程中服务重启后，启动自愈逻辑自动执行 clean_after_install 清理刚升级完成的自身安装包，不再遗留相同版本的 .fpk 文件；④修复 state_item 缺失自身的漏洞：使自身更新同样受到「已是最新就不下载」全局 409 拦截防护。
 checksum              =

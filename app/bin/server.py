@@ -1346,7 +1346,16 @@ def _auto_download(results):
     now = time.time()
     n = 0
     for r in results:
+        # 1. 绝不自动下载本应用自身！自身更新永远由用户手动在顶部区块触发
+        if r.get("self") or r.get("appname") == APP_NAME:
+            continue
+        # 2. 没有可更新标记或检查出错：绝不下载
         if not r.get("update_available") or r.get("error"):
+            continue
+        # 3. 严格核验：如果当前装的版本已经是最新版（或更高），严禁下载！
+        inst = norm_version(installed_version(r.get("appname") or "") or r.get("installed") or "")
+        latest = norm_version(r.get("latest") or "")
+        if inst and latest and (inst == latest or not is_newer(latest, inst)):
             continue
         dl = r.get("downloaded")
         if dl and dl.get("complete") and norm_version(dl.get("version") or "") == norm_version(r.get("latest") or ""):
@@ -1479,10 +1488,17 @@ def _run_check_locked(trigger, force=False):
 
 
 def state_item(appname):
-    """从最近一次检测结果里取某个应用的那条。"""
-    for r in (cached_state().get("apps") or []):
+    """从最近一次检测结果里取某个应用的那条（包含普通应用与自身）。"""
+    st = cached_state()
+    if appname == APP_NAME:
+        s = st.get("self")
+        if isinstance(s, dict) and s.get("appname") == APP_NAME:
+            return s
+    for r in (st.get("apps") or []):
         if r.get("appname") == appname:
             return r
+    if appname == APP_NAME:
+        return st.get("self")
     return None
 
 
@@ -2025,6 +2041,13 @@ def do_download(tid, appname):
     try:
         update_task(tid, stage="checking", message="正在确认最新版本…")
         rel = resolve_source(app)
+        cur = installed_version(appname)
+        if cur and norm_version(cur) == norm_version(rel["version"]):
+            update_task(tid, status="ok", stage="done", percent=100,
+                        message="已是该版本（%s），无需重复下载" % cur, version=cur,
+                        finished_at=now_iso())
+            log("[%s] 当前已是该版本 %s，无需重复下载" % (appname, cur))
+            return
         fpk_path, total, got, mf = _download_package(app, rel, tid)
         update_task(tid, status="ok", stage="downloaded", percent=100,
                     message="已下载 %s（%s，sha256 %s…）" % (rel["asset_name"], _human(total), got[:16]),
@@ -2145,9 +2168,9 @@ def do_update(tid, appname):
                         message="本地已有校验过的 %s，直接安装（不重复下载）" % rel["version"])
         else:
             fpk_path, _total, _got, mf = _download_package(app, rel, tid)
-        # 先把目标版本写进任务里：**自更新**（升级 fpk-update 自己）会在升级过程中被应用中心
-        # 重启，进程没了、后面的代码不会执行 —— 重启后靠这个字段判断「到底装上了没」。
-        update_task(tid, version=mf["version"], stage="installing",
+        # 先把目标版本与安装包路径写进任务里：**自更新**（升级 fpk-update 自己）会在升级过程中被应用中心
+        # 重启，进程没了、后面的代码不会执行 —— 重启后靠这些字段判断「到底装上了没」并清理刚装好的包。
+        update_task(tid, version=mf["version"], path=fpk_path, stage="installing",
                     message="正在升级（%s → %s）…" % (cur, mf["version"]))
         upgrade_via_daemon(fpk_path, appname, mf["version"], progress=_task_progress(tid))
         note = clean_after_install(appname, fpk_path, mf["version"])
@@ -3497,6 +3520,14 @@ def _recover_stale_tasks():
                 if st == "ok":
                     log("启动自愈：%s 的 %s 任务在重启前已完成（已装 %s）"
                         % (t.get("appname"), t.get("action"), t.get("version")))
+                    # 升级成功且开启了自动清理：把刚装好的包清理掉！
+                    pkg_path = t.get("path")
+                    if pkg_path and os.path.isfile(pkg_path):
+                        clean_after_install(t.get("appname"), pkg_path, t.get("version"))
+                    elif t.get("appname") == APP_NAME:
+                        self_pkg = os.path.join(download_dir(), "fpk-update-%s.fpk" % t.get("version"))
+                        if os.path.isfile(self_pkg):
+                            clean_after_install(APP_NAME, self_pkg, t.get("version"))
                 t["finished_at"] = now_iso()
                 t["updated_at"] = now_iso()
                 n += 1
