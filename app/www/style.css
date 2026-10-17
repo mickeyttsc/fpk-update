@@ -53,7 +53,10 @@
   --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .35);
 }
 
-* { box-sizing: border-box; }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body, button, .btn, a, input, select, textarea, .tab, .filter-chip, .lb-btn {
+  touch-action: manipulation;
+}
 html, body { margin: 0; padding: 0; }
 body {
   background: var(--bg);
@@ -83,10 +86,13 @@ code {
   color: var(--fg); font: inherit; font-weight: 500;
   padding: 9px 15px; border-radius: 10px; cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
-  transition: background .15s, border-color .15s, opacity .15s, transform .06s;
+  transition: background .15s, border-color .15s, opacity .15s, transform .05s cubic-bezier(.2, 0, 0, 1);
   white-space: nowrap;
 }
-.btn:active { transform: translateY(1px); }
+.btn:active, .tab:active, .icon-btn:active, .filter-chip:active, .lb-btn:active {
+  transform: scale(.96);
+  opacity: .85;
+}
 .btn:disabled { opacity: .42; cursor: not-allowed; }
 /* 正在跑的动作：让图标转圈。
    ⚠️ 不要改成"替换按钮里的文字/图标" —— 手机端 CSS 把按钮里的 span 隐藏了
@@ -409,13 +415,13 @@ code {
   /* 入场：遮罩淡入（不是"啪"地出现）；退场由 .closing 播完再隐藏（JS 负责时序）。
      ⚠️ 这里**不要**加 backdrop-filter：全屏模糊层再叠动画在手机 webview 上会掉帧，
      观感反而更差（实测反馈"卡卡的"）。需要压暗时调背景透明度就够了。 */
-  animation: m-fade-in .18s ease-out both;
+  animation: m-fade-in .14s ease-out both;
 }
-.modal.closing { animation: m-fade-out .15s ease-in both; }
+.modal.closing { animation: m-fade-out .12s ease-in both; }
 .modal-card {
-  animation: m-card-in .22s cubic-bezier(.16, 1, .3, 1) both;
+  animation: m-card-in .16s cubic-bezier(.16, 1, .3, 1) both;
 }
-.modal.closing .modal-card { animation: m-card-out .15s ease-in both; }
+.modal.closing .modal-card { animation: m-card-out .12s ease-in both; }
 @keyframes m-fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes m-fade-out { from { opacity: 1; } to { opacity: 0; } }
 @keyframes m-card-in {

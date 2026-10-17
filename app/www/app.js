@@ -385,12 +385,20 @@ function renderCard(app) {
   if (app.uninstalled) {
     const ready = !!(app.downloaded && app.downloaded.complete);
     const b = btn(ready ? '安装' : '下载并安装', 'primary sm',
-      () => doFirstInstall(app, ready),
+      () => doFirstInstall(app, ready, b),
       ready ? '用本地已校验的安装包完成安装（可先选存储空间）'
             : '先下载并校验安装包，再由应用中心完成安装（可先选存储空间）');
     b.disabled = busy || !app.latest || (!!app.error && !ready);
     actions.appendChild(b);
     card.appendChild(actions);
+    // 静默预加载：若已有校验过的本地包，空闲时预热向导参数与存储空间，点「安装」立即可见弹窗
+    if (ready && app.latest) {
+      if (typeof requestIdleCallback === 'function') {
+        requestIdleCallback(() => { getVolumes(); getWizard(app.appname); });
+      } else {
+        setTimeout(() => { getVolumes(); getWizard(app.appname); }, 100);
+      }
+    }
     return card;
   }
 
@@ -404,7 +412,7 @@ function renderCard(app) {
   const actLabel = app.update_available ? '更新' : '安装';
   // 已是最新时按钮文案直接写「已是最新」：写「安装」会让用户以为还能点（截图反馈过）
   const bAct = btn(upToDate ? '已是最新' : actLabel, 'primary sm',
-    () => doAction(app, 'update', actLabel),
+    () => doAction(app, 'update', actLabel, bAct),
     !app.latest ? '暂无可用版本'
       : (!needAction ? '已是最新，无需操作'
                      : (localReady ? ('用已下好的 ' + app.downloaded.version + ' 安装（不重复下载）')
@@ -831,7 +839,7 @@ function renderSummary(s) {
   $('all-download').classList.toggle('hidden', !n);
 }
 
-async function doAll(action) {
+async function doAll(action, triggerBtn) {
   const apps = (state.apps || []).filter((a) => a.update_available);
   const names = apps.map((a) => a.display || a.appname).join('、');
   const what = action === 'update' ? '更新' : '下载';
@@ -843,14 +851,20 @@ async function doAll(action) {
       : '没有需要下载的应用（均为最新）', '');
     return;
   }
-  const okAll = await askDialog({
-    title: '对 ' + apps.length + ' 个应用执行「全部' + what + '」',
-    rows: apps.map((a) => [[a.display || a.appname, a.update_available ? (a.installed + ' → ' + a.latest) : '']]),
-    notes: [action === 'update'
-      ? '会依次下载并升级，每装一个该应用会短暂重启。队列一次跑一个。'
-      : '只下载安装包到本地，不改动任何应用。'],
-    okText: '全部' + what,
-  });
+  if (triggerBtn) busyOn(triggerBtn, '正在准备…');
+  let okAll = false;
+  try {
+    okAll = await askDialog({
+      title: '对 ' + apps.length + ' 个应用执行「全部' + what + '」',
+      rows: apps.map((a) => [[a.display || a.appname, a.update_available ? (a.installed + ' → ' + a.latest) : '']]),
+      notes: [action === 'update'
+        ? '会依次下载并升级，每装一个该应用会短暂重启。队列一次跑一个。'
+        : '只下载安装包到本地，不改动任何应用。'],
+      okText: '全部' + what,
+    });
+  } finally {
+    if (triggerBtn) busyOff(triggerBtn);
+  }
   if (!okAll) return;
   try {
     const r = await api('/api/all', { method: 'POST', body: { action } });
@@ -865,12 +879,18 @@ async function doAll(action) {
 }
 
 /* ── 安装包清理（一键） ── */
-async function doClean() {
+async function doClean(triggerBtn) {
+  if (triggerBtn) busyOn(triggerBtn, '正在分析待清理文件…');
   let r;
   try {
     // 先 dry 拿清单（只复盘、不删），让确认框里能看到到底会删什么
     r = await api('/api/clean', { method: 'POST', body: { dry: true } });
-  } catch (e) { toast(e.message, 'err'); return; }
+  } catch (e) {
+    toast(e.message, 'err');
+    return;
+  } finally {
+    if (triggerBtn) busyOff(triggerBtn);
+  }
   const items = r.items || [];
   const fgn = r.foreign_count || 0;
   const parts = r.parts_count || 0;
@@ -1146,7 +1166,7 @@ function closeModal(el) {
     el.classList.add('hidden');
     el.classList.remove('closing');
     _closeTimers.delete(el);
-  }, 150);
+  }, 120);
   _closeTimers.set(el, tm);
 }
 
@@ -1321,6 +1341,8 @@ function askDialog(opt) {
         if (!good) okAll = false;
       });
       if (!okAll) return;              // 校验没过不关窗，让用户改
+      ok.disabled = true;
+      ok.classList.add('spin');
       // 选择值交给调用方（只有确认才给；取消时什么都不给）
       if (o.onOk) { try { o.onOk(readValues()); } catch (e) { /* 调用方自己兜 */ } }
       done(true);
@@ -1338,6 +1360,8 @@ function askDialog(opt) {
     };
     function done(v) {
       closeModal(modal);
+      ok.classList.remove('spin');
+      ok.disabled = false;
       ok.removeEventListener('click', onOk);
       $('cf-cancel').removeEventListener('click', onNo);
       modal.removeEventListener('click', onBg);
@@ -1382,8 +1406,15 @@ const CONFIRM = {
   }),
 };
 
-async function doAction(app, action, label) {
-  if (!(await askDialog(CONFIRM[action](app)))) return;
+async function doAction(app, action, label, triggerBtn) {
+  if (triggerBtn) busyOn(triggerBtn, '正在准备…');
+  let ok = false;
+  try {
+    ok = await askDialog(CONFIRM[action](app));
+  } finally {
+    if (triggerBtn) busyOff(triggerBtn);
+  }
+  if (!ok) return;
   try {
     const r = await api(ENDPOINT[action], { method: 'POST', body: { appname: app.appname } });
     toast('已加入后台队列（' + label + '），可以关掉页面');
@@ -1397,37 +1428,61 @@ async function doAction(app, action, label) {
 /* 未安装应用的**完整安装**：选存储空间 + 填安装参数（端口/密钥等向导字段）→
    入队「安装」（后端：下载→校验→应用中心装好并拉起）。
    参数表从 /api/wizard 取：本地有包读本地包，没有就远端头窗/仓库源码/小包预览。 */
-let firstInstallBusy = false;      // 防双击：取参数表可能要 1~3 秒，期间按钮还在
-async function doFirstInstall(app, pkgReady) {
+let _volumesCache = null;
+let _volumesPromise = null;
+async function getVolumes(force) {
+  if (!force && _volumesCache) return _volumesCache;
+  if (_volumesPromise) return _volumesPromise;
+  _volumesPromise = api('/api/volumes').then((r) => {
+    _volumesCache = { volumes: r.volumes || [], default: r.default };
+    _volumesPromise = null;
+    return _volumesCache;
+  }).catch((e) => {
+    _volumesPromise = null;
+    throw e;
+  });
+  return _volumesPromise;
+}
+
+let _wizardCache = {};
+async function getWizard(appname, force) {
+  if (!force && _wizardCache[appname]) return _wizardCache[appname];
+  const wz = await api('/api/wizard?appname=' + encodeURIComponent(appname));
+  if (wz && !wz.defer) _wizardCache[appname] = wz;
+  return wz;
+}
+
+let firstInstallBusy = false;      // 防双击：取参数表期间按钮置灰+转圈
+async function doFirstInstall(app, pkgReady, triggerBtn) {
   if (firstInstallBusy) return;
   firstInstallBusy = true;
+  if (triggerBtn) busyOn(triggerBtn, '正在准备安装…');
   try {
     return await _doFirstInstallJob(app, pkgReady);
   } finally {
     firstInstallBusy = false;
+    if (triggerBtn) busyOff(triggerBtn);
   }
 }
 
 async function _doFirstInstallJob(app, pkgReady) {
   let vols = [];
   let defVol = null;
+  let wz = null;
   try {
-    const r = await api('/api/volumes');
-    vols = r.volumes || [];
-    defVol = r.default;
+    const [volRes, wzRes] = await Promise.all([
+      getVolumes(),
+      getWizard(app.appname),
+    ]);
+    vols = (volRes && volRes.volumes) || [];
+    defVol = volRes && volRes.default;
+    wz = wzRes;
   } catch (e) {
-    toast('无法获取存储空间列表：' + e.message, 'err');
+    toast('准备安装向导失败：' + e.message, 'err');
     return;
   }
   if (!vols.length) {
     toast('系统里没有可用于安装的存储空间', 'err');
-    return;
-  }
-  let wz = null;
-  try {
-    wz = await api('/api/wizard?appname=' + encodeURIComponent(app.appname));
-  } catch (e) {
-    toast('读取安装参数失败：' + e.message, 'err');
     return;
   }
   // 包太大且读不到参数表 → 先下载；下好后卡片按钮变「安装」，那时本地包在手，
@@ -1668,13 +1723,13 @@ $('speed-save').addEventListener('click', async () => {
 });
 
 /* ── 分页/汇总/列表 ── */
-$('all-download').addEventListener('click', () => doAll('download'));
+$('all-download').addEventListener('click', (ev) => doAll('download', ev.currentTarget));
 /* 顶栏「一键更新」：与汇总条的「全部更新」同一条链路（含应用内确认弹窗）。 */
-$('update-all-btn').addEventListener('click', () => doAll('update'));
+$('update-all-btn').addEventListener('click', (ev) => doAll('update', ev.currentTarget));
 
 /* ── 安装包清理 ── */
-$('clean-btn').addEventListener('click', doClean);
-$('clean-now-btn').addEventListener('click', doClean);
+$('clean-btn').addEventListener('click', (ev) => doClean(ev.currentTarget));
+$('clean-now-btn').addEventListener('click', (ev) => doClean(ev.currentTarget));
 $('clean-refresh').addEventListener('click', async () => {
   await refresh();
   toast('已刷新', '');

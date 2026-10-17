@@ -833,7 +833,8 @@ def wizard_spec_for(app, rel):
     全部不成 → defer=True（前端改为「先下载、下好再填表安装」）。
     返回 {fields, source, defer, local_ready}。
     """
-    key = "%s|%s" % (rel.get("asset_url") or "", rel.get("size") or "")
+    key = "%s|%s" % (rel.get("asset_url") or app.get("appname") or "",
+                     rel.get("size") or rel.get("version") or "")
 
     # ① 本地已校验的包：**必须放在缓存之前**。
     #    实测 bug：第一次点「安装」时包还没下完 → 判定 defer 并进了缓存；包下好之后
@@ -3553,10 +3554,31 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "fields": [], "source": "installed",
                                    "defer": False, "local_ready": False})
             app = _resolve_app(appname)
-            try:
-                rel = resolve_source(app)
-            except Exception as exc:  # noqa: BLE001
-                return self._err(400, "无法解析最新版本：%s" % exc)
+            # 极速路径：若上次检测结果已有该应用（带版本与 sha256），优先构造轻量 rel。
+            # 本地包在手时直接读取，免去向 GitHub 请求 release 与探测远端包头（实测省 700ms~1.5s）。
+            rel = None
+            st = cached_state()
+            cached_app = next((a for a in st.get("apps", []) if a.get("appname") == appname), None)
+            if cached_app and (cached_app.get("latest") or cached_app.get("version")):
+                fast_rel = {
+                    "version": cached_app.get("latest") or cached_app.get("version") or "",
+                    "asset_name": cached_app.get("asset_name") or "",
+                    "sha256": cached_app.get("sha256") or "",
+                    "size": cached_app.get("size"),
+                    "tag": cached_app.get("tag") or "",
+                    "asset_url": cached_app.get("asset_url") or "",
+                }
+                try:
+                    lp, _ = local_package_for(appname, fast_rel)
+                    if lp:
+                        rel = fast_rel
+                except Exception:
+                    pass
+            if not rel:
+                try:
+                    rel = resolve_source(app)
+                except Exception as exc:  # noqa: BLE001
+                    return self._err(400, "无法解析最新版本：%s" % exc)
             spec = wizard_spec_for(app, rel)
             spec["ok"] = True
             spec["latest"] = rel.get("version")
