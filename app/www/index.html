@@ -60,7 +60,16 @@
   </div>
 </header>
 
-<div class="notice hidden" id="notice"></div>
+<div class="notice hidden" id="notice" role="button" tabindex="0" title="点击查看任务队列详情"></div>
+
+<!-- 任务抽屉面板：点击顶部后台任务时平滑展开/折叠 -->
+<div class="task-drawer hidden" id="task-drawer">
+  <div class="task-drawer-head">
+    <span>任务队列详情</span>
+    <button class="btn ghost icon-only sm" id="task-drawer-close" aria-label="关闭任务抽屉">✕</button>
+  </div>
+  <div class="task-drawer-list" id="task-drawer-list"></div>
+</div>
 
 <!-- 本应用自身的更新：**单独一块**，不混进下面「被管理的应用」列表。
      为什么不混：更新它会重启本进程（页面上的 js/css 立刻过期，得自动刷新界面）；
@@ -242,11 +251,13 @@
             <span>加速镜像</span>
             <select id="mirror-select"></select>
           </label>
+          <button class="btn ghost sm" id="mirror-ping-btn" title="并发检测各镜像可用性与延迟">测速</button>
         </div>
         <div class="row hidden" id="mirror-custom">
           <input type="text" id="mirror-input" placeholder="https://gh-proxy.com"
                  spellcheck="false" autocomplete="off">
         </div>
+        <div class="mirror-ping-results hidden" id="mirror-ping-results"></div>
         <div class="row">
           <button class="btn primary" id="speed-save">保存</button>
         </div>
@@ -340,6 +351,17 @@
           下载/安装都在后台队列里跑，<b>关掉页面也会继续</b>；重新打开能看到进度。
           队列一次跑一个，避免几个大包互相抢带宽。
         </p>
+
+        <h4>新版本消息通知 (Webhook)</h4>
+        <p class="set-hint">
+          配置 Webhook 后，每 60 分钟自动检测发现新版本时将自动发送通知（支持 Bark、Gotify、Server酱、企业微信/飞书/钉钉等）。
+        </p>
+        <div class="row">
+          <input type="text" id="webhook-input" placeholder="https://api.day.app/your-key 或 https://qyapi.weixin.qq.com/..."
+                 autocomplete="off" spellcheck="false">
+          <button class="btn primary" id="webhook-save">保存</button>
+          <button class="btn ghost" id="webhook-test-btn" title="立即发送一条测试通知">测试推送</button>
+        </div>
         <div class="tasklist" id="task-list"></div>
         <div class="row">
           <button class="btn ghost" id="task-clear">清理已完成</button>

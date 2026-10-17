@@ -463,7 +463,17 @@ def gh_releases(repo, force=False):
 
 
 def _gh_error_message(exc):
-    """把 GitHub 的 HTTP 错误翻译成用户能照着做的提示。"""
+    """把 GitHub 的 HTTP/网络错误分类翻译成可操作的人话提示。"""
+    if isinstance(exc, (urllib.error.URLError, socket.gaierror, TimeoutError)):
+        reason = str(getattr(exc, "reason", exc))
+        if "Name or service not known" in reason or "getaddrinfo failed" in reason:
+            return "网络异常：DNS 无法解析 github.com（请检查 NAS 本机 DNS 或网络连接）"
+        if "timed out" in reason or "Timeout" in reason:
+            return "网络异常：连接 GitHub 超时（可能存在网络阻断或丢包，建议设置中配置加速镜像）"
+        if "Connection refused" in reason or "Network is unreachable" in reason:
+            return "网络异常：无法连接 GitHub（外网出口不通或代理离线）"
+        return "网络连接失败：%s" % reason
+
     code = getattr(exc, "code", None)
     headers = getattr(exc, "headers", None)
     remaining = ""
@@ -476,7 +486,7 @@ def _gh_error_message(exc):
             return ("GitHub 访问令牌的额度也用尽了（5000 次/小时）—— 稍后再试，"
                     "或换一个令牌")
         return ("GitHub 匿名额度已用尽（60 次/小时，按出口 IP 计算，同一个 IP 上"
-                "别的程序也会消耗它）。请在「更多 → GitHub 访问令牌」里填入一个"
+                "别的程序也会消耗它）。请在「设置 → 其它」里填入一个"
                 "令牌（只读即可，5000 次/小时）后重试")
     if code == 403:
         return "GitHub 拒绝访问（403）—— 若是限流请稍后重试；也可能是令牌权限不足"
@@ -1605,6 +1615,69 @@ AUTO_DL_STATE = os.path.join(VAR_DIR, "auto-download.json")
 AUTO_DL_RETRY_SEC = 30 * 60      # 同一个应用两次自动下载至少隔这么久
 
 
+NOTIFY_STATE = os.path.join(VAR_DIR, "notify-state.json")
+
+
+def send_webhook_notification(title, content, url=None):
+    """向配置的 Webhook 发送一条新版本通知。
+
+    支持各类常见 Webhook 格式（Server酱、Bark、Gotify、钉钉/企微/飞书机器人及普通 POST JSON）。
+    单次超时 8 秒，绝不阻塞主流程，异常仅记日志。
+    """
+    target = url or load_settings().get("webhook_url")
+    if not target:
+        return False, "未配置 Webhook URL"
+    payload = {
+        "title": title,
+        "content": content,
+        "text": "%s\n\n%s" % (title, content),
+        "msgtype": "text",
+        "body": content,
+        "message": "%s: %s" % (title, content),
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(target, data=data, method="POST")
+    req.add_header("Content-Type", "application/json; charset=utf-8")
+    req.add_header("User-Agent", "fpk-update/1.0")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            code = resp.status
+            return True, "HTTP %d" % code
+    except Exception as exc:  # noqa: BLE001
+        log("[webhook] 推送失败：%s" % exc)
+        return False, str(exc)
+
+
+def _notify_new_versions(results):
+    """自动检测发现新版本时，静默发送 Webhook 推送提醒。
+
+    带已通知状态去重：同一个应用的同一个新版本只提醒一次，不重复骚扰。
+    """
+    wh = load_settings().get("webhook_url")
+    if not wh:
+        return
+    notified = load_json(NOTIFY_STATE)
+    if not isinstance(notified, dict):
+        notified = {}
+    new_hits = []
+    for r in results:
+        if r.get("update_available") and r.get("latest"):
+            key = "%s@%s" % (r.get("appname"), r.get("latest"))
+            if not notified.get(key):
+                new_hits.append(r)
+                notified[key] = now_iso()
+    if not new_hits:
+        return
+    lines = []
+    for h in new_hits:
+        lines.append("• %s：%s → %s" % (h.get("display") or h.get("appname"),
+                                        h.get("installed") or "?", h.get("latest")))
+    title = "【FPK更新】检测到 %d 个应用有新版本" % len(new_hits)
+    content = "\n".join(lines)
+    send_webhook_notification(title, content, wh)
+    save_json(NOTIFY_STATE, notified)
+
+
 def _auto_download(results):
     """【自动下载】把「有新版本但本地还没下」的排进下载队列。
 
@@ -1755,6 +1828,7 @@ def _run_check_locked(trigger, force=False):
                              "finished_at": datetime.now(CST).isoformat(timespec="seconds")})
     if load_settings().get("auto_download"):
         _auto_download(results)
+    _notify_new_versions(results)
     return results
 
 
@@ -2883,7 +2957,8 @@ def load_settings():
             "self_repo": self_repo,
             "theme": th,
             "sort": srt,
-            "filter": flt}
+            "filter": flt,
+            "webhook_url": str(data.get("webhook_url") or "").strip()}
 
 
 def download_dir():
@@ -4017,6 +4092,11 @@ class Handler(BaseHTTPRequestHandler):
                 if flt not in ("all", "update"):
                     return self._err(400, "过滤视图只能是 all / update")
                 new["filter"] = flt
+            if "webhook_url" in body:
+                wh = str(body.get("webhook_url") or "").strip()
+                if wh and not re.match(r"^https?://[^\s]+$", wh):
+                    return self._err(400, "Webhook 必须是 http:// 或 https:// 开头的有效网址")
+                new["webhook_url"] = wh
             if "self_repo" in body:
                 rp = str(body.get("self_repo") or "").strip()
                 _m = re.match(r"^https?://github\.com/([^/]+)/([^/?#]+?)(?:\.git)?/?$", rp)
@@ -4336,6 +4416,46 @@ class Handler(BaseHTTPRequestHandler):
                 save_json(APPS_USER, cur)
             run_check(trigger="import")
             return self._json({"ok": True, "added": added, "total": len(final_apps)})
+
+        if path == "/api/webhook/test":
+            body = self._read_body()
+            target = str(body.get("url") or "").strip() or load_settings().get("webhook_url")
+            if not target:
+                return self._err(400, "请先填入 Webhook URL")
+            ok, msg = send_webhook_notification("【FPK更新】测试通知",
+                                                "这是一条来自 fnOS FPK更新 的测试消息。当你收到这条消息，说明 Webhook 配置成功，有新版本时将自动提醒。",
+                                                url=target)
+            if not ok:
+                return self._err(500, "测试推送失败：%s" % msg)
+            return self._json({"ok": True, "message": "推送成功（%s）" % msg})
+
+        if path == "/api/mirrors/ping":
+            # 并发测速：向各镜像测一个短包头的响应耗时
+            res = []
+            test_target = "https://raw.githubusercontent.com/mickeyttsc/fpk-update/main/manifest"
+            def probe_one(m):
+                prefix = m.get("prefix") or ""
+                url = (prefix + "/" + test_target) if prefix else test_target
+                t0 = time.time()
+                try:
+                    req = urllib.request.Request(url, method="HEAD")
+                    req.add_header("User-Agent", "fpk-update/1.0")
+                    with urllib.request.urlopen(req, timeout=3.5) as resp:
+                        ms = int((time.time() - t0) * 1000)
+                        return {"key": m["key"], "label": m["label"], "latency_ms": ms, "ok": True}
+                except Exception as exc:  # noqa: BLE001
+                    return {"key": m["key"], "label": m["label"], "latency_ms": None, "ok": False, "error": str(exc)[:40]}
+            threads = []
+            results_box = []
+            def worker(preset):
+                results_box.append(probe_one(preset))
+            for p in MIRROR_PRESETS:
+                th = threading.Thread(target=worker, args=(p,))
+                threads.append(th)
+                th.start()
+            for th in threads:
+                th.join(timeout=4.0)
+            return self._json({"ok": True, "mirrors": results_box})
 
         return self._err(404, "未知接口")
 

@@ -81,11 +81,61 @@ function toast(msg, kind = '', ms = 4200) {
   setTimeout(() => el.remove(), ms);
 }
 
+let taskDrawerOpen = false;
+
+function toggleTaskDrawer() {
+  const dr = $('task-drawer');
+  if (!dr) return;
+  taskDrawerOpen = !taskDrawerOpen;
+  dr.classList.toggle('hidden', !taskDrawerOpen);
+  if (taskDrawerOpen) renderTaskDrawer();
+}
+
+function renderTaskDrawer() {
+  const list = $('task-drawer-list');
+  if (!list) return;
+  list.textContent = '';
+  const ts = (state && state.tasks) || [];
+  if (!ts.length) {
+    const empty = document.createElement('div');
+    empty.className = 'td-msg';
+    empty.textContent = '当前没有后台任务';
+    list.appendChild(empty);
+    return;
+  }
+  ts.forEach((t) => {
+    const it = document.createElement('div');
+    it.className = 'td-item';
+    const left = document.createElement('div');
+    left.className = 'td-left';
+    const name = document.createElement('strong');
+    name.textContent = t.display || t.appname;
+    const stage = document.createElement('span');
+    stage.className = 'td-stage';
+    stage.textContent = actionLabel(t.action) + ' · ' + (t.status === 'ok' ? '完成' : (t.status === 'err' ? '失败' : (t.stage || '进行中')));
+    left.appendChild(name);
+    left.appendChild(stage);
+    const right = document.createElement('div');
+    right.className = 'td-msg';
+    right.textContent = (t.percent !== null && t.percent !== undefined ? (t.percent + '% · ') : '') + (t.message || '—');
+    it.appendChild(left);
+    it.appendChild(right);
+    list.appendChild(it);
+  });
+}
+
 function showNotice(msg, kind = 'info') {
   const el = $('notice');
-  if (!msg) { el.classList.add('hidden'); return; }
+  if (!msg) {
+    el.classList.add('hidden');
+    if ($('task-drawer')) $('task-drawer').classList.add('hidden');
+    taskDrawerOpen = false;
+    return;
+  }
   el.textContent = msg;
   el.className = 'notice ' + kind;
+  el.onclick = toggleTaskDrawer;
+  if (taskDrawerOpen) renderTaskDrawer();
 }
 
 /* ── 格式化 ── */
@@ -864,6 +914,7 @@ function syncSettingsPanels(s) {
     });
   }
   fillMirrorSelect(st.mirror || '', s.mirror_presets || []);
+  syncInput('webhook-input', st.webhook_url || '');
   // 自身更新用哪条来源（留空 = 内置默认）
   syncInput('self-repo-input', st.self_repo || s.self_default_repo || '');
   $('self-repo-kv').textContent = (s.self_repo || s.self_default_repo || '—')
@@ -1878,6 +1929,74 @@ $('dl-reset').addEventListener('click', async () => {
 
 /* ── 下载加速设置 ── */
 $('mirror-select').addEventListener('change', syncMirrorInput);
+
+$('mirror-ping-btn').addEventListener('click', async () => {
+  const btn = $('mirror-ping-btn');
+  const box = $('mirror-ping-results');
+  btn.disabled = true;
+  btn.textContent = '测速中…';
+  box.classList.remove('hidden');
+  box.textContent = '正在并发检测各镜像可用性与延迟…';
+  try {
+    const r = await api('/api/mirrors/ping');
+    box.textContent = '';
+    const sorted = (r.mirrors || []).slice().sort((a, b) => {
+      if (a.ok && !b.ok) return -1;
+      if (!a.ok && b.ok) return 1;
+      return (a.latency_ms || 99999) - (b.latency_ms || 99999);
+    });
+    sorted.forEach((m, idx) => {
+      const it = document.createElement('div');
+      it.className = 'mp-item' + (idx === 0 && m.ok ? ' fast' : '');
+      const left = document.createElement('span');
+      left.textContent = m.label + (idx === 0 && m.ok ? '（推荐最快）' : '');
+      const right = document.createElement('span');
+      right.textContent = m.ok ? (m.latency_ms + ' ms') : '不可用';
+      it.appendChild(left);
+      it.appendChild(right);
+      it.style.cursor = 'pointer';
+      it.title = '点击选用此镜像';
+      it.addEventListener('click', () => {
+        $('mirror-select').value = m.key;
+        syncMirrorInput();
+        $('speed-save').click();
+      });
+      box.appendChild(it);
+    });
+  } catch (e) {
+    box.textContent = '测速失败：' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '测速';
+  }
+});
+
+$('webhook-save').addEventListener('click', async () => {
+  const url = $('webhook-input').value.trim();
+  try {
+    const r = await api('/api/settings', { method: 'POST', body: { webhook_url: url } });
+    toast(r.settings.webhook_url ? 'Webhook 已保存' : 'Webhook 已清除', 'ok');
+    await refresh();
+  } catch (e) { toast(e.message, 'err'); }
+});
+
+$('webhook-test-btn').addEventListener('click', async () => {
+  const btn = $('webhook-test-btn');
+  btn.disabled = true;
+  const url = $('webhook-input').value.trim();
+  try {
+    const r = await api('/api/webhook/test', { method: 'POST', body: { url } });
+    toast(r.message || '测试推送成功', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  finally { btn.disabled = false; }
+});
+
+if ($('task-drawer-close')) {
+  $('task-drawer-close').addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    toggleTaskDrawer();
+  });
+}
 
 $('speed-save').addEventListener('click', async () => {
   const body = {
