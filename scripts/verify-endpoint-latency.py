@@ -478,6 +478,35 @@ def main():
     chk("max-age" in cc, "图标带可缓存头（不再 no-cache）", cc)
     chk(hd.get("ETag"), "图标带 ETag（可 304 复用）", hd.get("ETag"))
 
+    # ── clean_after_install 排除当前进行中的任务（不再自锁误判）──
+    _test_pkg = os.path.join(m.download_dir(), "dummy-1.0.0.fpk")
+    with open(_test_pkg, "wb") as f:
+        f.write(b"PKGDUMMY")
+    m.record_package(_test_pkg, "installed-one", "1.2.3", 8, "f" * 64)
+    with open(os.path.join(var, "tasks.json"), "w", encoding="utf-8") as f:
+        json.dump({"seq": 1, "tasks": [
+            {"id": "t_selflock", "appname": "installed-one", "status": "running",
+             "path": _test_pkg, "version": "1.2.3"}
+        ]}, f)
+    # 模拟装好当前包：传入 ignore_tid="t_selflock" 必须能正常删除，不能被当前任务自锁
+    m.installed_version = lambda name: "1.2.3"
+    _ret_note = m.clean_after_install("installed-one", _test_pkg, "1.2.3", ignore_tid="t_selflock")
+    chk("已清理" in _ret_note and not os.path.exists(_test_pkg),
+        "clean_after_install 排除当前任务 tid，不会自锁误判", _ret_note)
+    os.remove(os.path.join(var, "tasks.json"))
+
+    # ── normalize_source 宽松归一化 ──
+    _norm1 = m.normalize_source({"repo": "https://github.com/foo/bar/releases"})
+    _norm2 = m.normalize_source({"repo": "https://github.com/foo/bar/tree/main"})
+    chk(_norm1["repo"] == "foo/bar" and _norm2["repo"] == "foo/bar",
+        "normalize_source 支持带 releases/tree 等子路径的 GitHub 地址", "%s, %s" % (_norm1["repo"], _norm2["repo"]))
+
+    # ── reconcile_state 实时校准状态 ──
+    _st_test = {"apps": [{"appname": "installed-one", "installed": None, "latest": "1.2.3"}]}
+    m.reconcile_state(_st_test)
+    chk(_st_test["apps"][0]["installed"] == "1.2.3" and not _st_test["apps"][0]["uninstalled"],
+        "reconcile_state 实时穿透读取安装状态，消除滞后", str(_st_test["apps"][0]))
+
     httpd.shutdown()
     httpd.server_close()
     shutil.rmtree(tmp, ignore_errors=True)

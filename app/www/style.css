@@ -225,11 +225,23 @@ code {
 /* ── 列表工具条：应用数量 + 排序方式 ── */
 .listbar {
   max-width: 1240px; margin: 14px auto 0; padding: 0 16px;
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
   margin-left: 16px; margin-right: 16px;
 }
 @media (min-width: 1272px) { .listbar { margin-left: auto; margin-right: auto; } }
-.listbar .lb-count { flex: 1; min-width: 0; font-size: 12.5px; color: var(--fg-muted); }
+.listbar .lb-left { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
+.listbar .lb-count { font-size: 12.5px; color: var(--fg-muted); flex: none; }
+.lb-search { flex: 1; max-width: 240px; min-width: 100px; }
+.search-input {
+  width: 100%; font: inherit; font-size: 12.5px; color: var(--fg);
+  background: var(--bg-soft); border: 1px solid var(--line);
+  padding: 5px 10px; border-radius: 8px; outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+.search-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
 .lb-sort {
   display: flex; gap: 3px; padding: 3px; flex: none;
   background: var(--line-soft); border-radius: 10px;
@@ -245,6 +257,31 @@ code {
   background: var(--bg-soft); color: var(--fg);
   box-shadow: 0 1px 3px rgba(0, 0, 0, .08);
 }
+.c-menu-wrap { position: relative; margin-left: auto; flex: none; display: flex; align-items: center; gap: 6px; }
+.card-menu-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 7px; border: 1px solid transparent;
+  background: transparent; color: var(--fg-muted); cursor: pointer;
+  font-size: 14px; font-weight: bold; line-height: 1; user-select: none;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.card-menu-btn:hover { background: var(--line-soft); color: var(--fg); }
+.card-menu-dropdown {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 25;
+  background: var(--bg-soft); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow); padding: 5px 0; min-width: 130px;
+  animation: m-card-in .12s cubic-bezier(.16, 1, .3, 1) both;
+}
+.card-menu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 12px; font-size: 13px; color: var(--fg);
+  background: transparent; border: none; text-align: left; cursor: pointer;
+  text-decoration: none; box-sizing: border-box;
+}
+.card-menu-item:hover { background: var(--line-soft); }
+.card-menu-item.danger { color: var(--err); }
+.c-notes-body a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.apps-ops-row { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* ── 更新说明（对标应用商店的 changelog） ── */
 .c-notes { font-size: 12.5px; }

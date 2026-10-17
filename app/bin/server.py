@@ -294,6 +294,25 @@ def installed_display(appname):
     return None
 
 
+def installed_port(appname):
+    """读取已安装应用的对外服务端口（从 manifest service_port 字段读取）。"""
+    path = os.path.join(APPS_ROOT, appname, "manifest")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("service_port"):
+                    parts = line.split("=", 1)
+                    if len(parts) == 2:
+                        val = parts[1].strip().strip('"').strip("'")
+                        if val.isdigit():
+                            p = int(val)
+                            if 1 <= p <= 65535:
+                                return p
+    except OSError:
+        pass
+    return None
+
+
 def icon_path(appname):
     base = os.path.join(APPS_ROOT, appname)
     for name in ("ICON_256.PNG", "ICON.PNG", "ICON_256.png", "ICON.png"):
@@ -986,8 +1005,8 @@ def normalize_source(entry):
     """把一条白名单配置归一化成 {'repo','url','tag','asset','allow_prerelease','appname'}。"""
     repo = str(entry.get("repo") or "").strip()
     url = str(entry.get("url") or "").strip()
-    # 允许直接贴完整 GitHub 地址
-    m = re.match(r"^https?://github\.com/([^/]+)/([^/?#]+?)(?:\.git)?/?$", repo or url)
+    # 允许直接贴完整 GitHub 地址（包括仓库根、/releases、/tree、/blob 等任意子路径或查询参数）
+    m = re.match(r"^https?://github\.com/([^/]+)/([^/?#]+?)(?:\.git)?(?:[/?#].*)?$", repo or url)
     if m:
         repo = "%s/%s" % (m.group(1), m.group(2))
         url = "" if url == repo or m.group(0) == url else url
@@ -1751,12 +1770,65 @@ def download_needed(item):
     return True
 
 
+def reconcile_state(st):
+    """实时动态校准状态：毫秒级穿透读取 NAS 真实安装状态，消除信息滞后。
+
+    解决痛点：应用刚安装、更新或卸载后，若未触发后台全量检测，
+    cached_state 里存的仍是上次检查的历史快照，造成「已装好仍显示未安装」
+    或「已卸载仍显示最新」。
+    此处仅做内存/本地文件属性比对（耗时 < 1ms），绝不发起任何网络请求。
+    """
+    if not isinstance(st, dict):
+        return st
+    apps = st.get("apps")
+    if isinstance(apps, list):
+        for a in apps:
+            if not isinstance(a, dict):
+                continue
+            name = a.get("appname")
+            if not name:
+                continue
+            cur = installed_version(name)
+            a["installed"] = cur
+            a["uninstalled"] = not bool(cur)
+            if cur:
+                disp = installed_display(name)
+                if disp:
+                    a["manifest_display"] = disp
+                a["has_icon"] = bool(icon_path(name))
+                a["service_port"] = installed_port(name)
+                if not a.get("repo"):
+                    a["relation"] = "local"
+            else:
+                a["service_port"] = None
+                a["relation"] = "uninstalled"
+            lat = a.get("latest")
+            if cur and lat:
+                a["update_available"] = bool(is_newer(lat, cur))
+            else:
+                a["update_available"] = False
+            # 校验已下载文件是否真实存在于磁盘
+            dl = a.get("downloaded")
+            if dl and isinstance(dl, dict):
+                p = dl.get("path")
+                if not p or not os.path.isfile(p):
+                    a["downloaded"] = None
+    s = st.get("self")
+    if isinstance(s, dict):
+        cur_self = installed_version(APP_NAME)
+        s["installed"] = cur_self
+        lat_self = s.get("latest")
+        if cur_self and lat_self:
+            s["update_available"] = bool(is_newer(lat_self, cur_self))
+    return st
+
+
 def cached_state():
     data = load_json(LAST_CHECK_FILE)
     if not isinstance(data, dict):
         return {"at": None, "trigger": None, "apps": [], "self": None}
     data.setdefault("self", None)          # 老状态文件没有这一格 → 补上空值
-    return data
+    return reconcile_state(data)
 
 
 # ───────────────────────────── 内建下载服务 ─────────────────────────────
@@ -2328,7 +2400,7 @@ def do_install(tid, appname):
             # 已经是这一版：不装，但本地这个包就是多余的 —— 自动清理开着就一并清掉，
             # 否则「装完自动清理」在这条路径上会静默失约（界面通常不会走到这里，
             # 因为同版本时「安装」按钮是禁用的，但 API 可以）。
-            note = clean_after_install(appname, fpk_path, target_ver)
+            note = clean_after_install(appname, fpk_path, target_ver, ignore_tid=tid)
             update_task(tid, status="ok", stage="done", percent=100,
                         message="已是该版本（%s），无需安装%s" % (cur, note), version=target_ver,
                         path=("" if note else fpk_path), finished_at=now_iso())
@@ -2336,7 +2408,7 @@ def do_install(tid, appname):
         update_task(tid, version=target_ver, stage="installing",
                     message="正在安装（%s → %s）…" % (cur, target_ver))
         upgrade_via_daemon(fpk_path, appname, target_ver, progress=_task_progress(tid))
-        note = clean_after_install(appname, fpk_path, target_ver)
+        note = clean_after_install(appname, fpk_path, target_ver, ignore_tid=tid)
         update_task(tid, status="ok", stage="done", percent=100,
                     message="安装完成：%s → %s%s" % (cur, target_ver, note), version=target_ver,
                     path=("" if note else fpk_path), finished_at=now_iso())
@@ -2535,7 +2607,7 @@ def _do_first_install(tid, appname):
                            capture_output=True, timeout=90)
         except (OSError, subprocess.SubprocessError):
             pass
-        note = clean_after_install(appname, fpk_path, mf["version"])
+        note = clean_after_install(appname, fpk_path, mf["version"], ignore_tid=tid)
         if note:
             fpk_path = ""                 # 已清理，别再当回滚包写在任务里
         update_task(tid, status="ok", stage="done", percent=100,
@@ -2616,7 +2688,7 @@ def do_update(tid, appname):
         update_task(tid, version=mf["version"], path=fpk_path, stage="installing",
                     message="正在升级（%s → %s）…" % (cur, mf["version"]))
         upgrade_via_daemon(fpk_path, appname, mf["version"], progress=_task_progress(tid))
-        note = clean_after_install(appname, fpk_path, mf["version"])
+        note = clean_after_install(appname, fpk_path, mf["version"], ignore_tid=tid)
         if note:
             fpk_path = ""                 # 已清理，别再当回滚包写在任务里
         update_task(tid, status="ok", stage="done", percent=100,
@@ -2902,11 +2974,13 @@ def _foreign_asset_paths():
     return out
 
 
-def _package_in_use(path):
+def _package_in_use(path, ignore_tid=None):
     """正在被进行中/排队中的任务使用的包不许删。"""
     p = os.path.realpath(path)
     for t in list_tasks():
         if t.get("status") in ("running", "queued") and t.get("path"):
+            if ignore_tid and str(t.get("id")) == str(ignore_tid):
+                continue
             try:
                 if os.path.realpath(t["path"]) == p:
                     return True
@@ -3112,7 +3186,7 @@ def _safe_unlink_part(path):
     return True, ""
 
 
-def _safe_unlink(path):
+def _safe_unlink(path, ignore_tid=None):
     """删一个安装包。所有护栏都在这一个函数里，清理功能不可能越界。
 
     逐条拒绝：非法路径 / 符号链接 / 非 .fpk / 不在当前下载目录的直属层级 /
@@ -3129,7 +3203,7 @@ def _safe_unlink(path):
         return False, "不在当前的安装包下载目录里，拒绝删除"
     if not os.path.isfile(p):
         return False, "文件不存在"
-    if _package_in_use(p):
+    if _package_in_use(p, ignore_tid=ignore_tid):
         return False, "正被进行中的任务使用，请稍后再试"
     if p not in _load_registry():
         # 兜底：不是本应用下载的包，一律不删。目录里可能躺着用户的归档/回滚包。
@@ -3220,7 +3294,7 @@ def clean_packages(include_current=None):
             "self_deleted": self_deleted, "self_freed": self_freed}
 
 
-def clean_after_install(appname, fpk_path, target_version):
+def clean_after_install(appname, fpk_path, target_version, ignore_tid=None):
     """安装成功后清理「刚装的这个包」（可选，默认开）。
 
     只在两道核验都过了才删：**装完的版本确实等于目标版本**，且应用目录还在。
@@ -3242,7 +3316,7 @@ def clean_after_install(appname, fpk_path, target_version):
             return ""
     except OSError:
         return ""
-    ok, why = _safe_unlink(fpk_path)
+    ok, why = _safe_unlink(fpk_path, ignore_tid=ignore_tid)
     if ok:
         log("[%s] 安装成功，已清理安装包 %s" % (appname, fpk_path))
         return "，安装包已清理"
@@ -4153,6 +4227,69 @@ class Handler(BaseHTTPRequestHandler):
             write_token(tok)
             log("GitHub 访问令牌已%s" % ("更新" if tok else "清除"))
             return self._json({"ok": True, "has_token": bool(tok), "token_hint": token_hint()})
+
+        if path == "/api/apps/check-one":
+            body = self._read_body()
+            appname = str(body.get("appname") or "").strip()
+            if not appname:
+                return self._err(400, "缺少 appname")
+            app = _resolve_app(appname)
+            if not app:
+                return self._err(404, "找不到该应用")
+            try:
+                res = check_one(app, force=True)
+            except Exception as exc:  # noqa: BLE001
+                return self._err(500, "检查失败：%s" % exc)
+            with _lock:
+                st = load_json(LAST_CHECK_FILE) or {"at": None, "apps": []}
+                apps = st.get("apps") or []
+                updated = False
+                for i, a in enumerate(apps):
+                    if a.get("appname") == appname:
+                        apps[i] = res
+                        updated = True
+                        break
+                if not updated:
+                    apps.append(res)
+                st["apps"] = apps
+                save_json(LAST_CHECK_FILE, st)
+            return self._json({"ok": True, "app": res})
+
+        if path == "/api/apps/import":
+            body = self._read_body()
+            incoming = body.get("apps")
+            mode = str(body.get("mode") or "merge")
+            if not isinstance(incoming, list):
+                return self._err(400, "apps 必须是列表")
+            with _lock:
+                cur = load_json(APPS_USER)
+                if not isinstance(cur, dict):
+                    cur = load_json(APPS_DEFAULT) or {}
+                cur_apps = cur.get("apps") or []
+                final_apps = [] if mode == "replace" else list(cur_apps)
+                existing_repos = {normalize_source(x)["repo"] for x in final_apps if normalize_source(x).get("repo")}
+                existing_names = {normalize_source(x)["appname"] for x in final_apps if normalize_source(x).get("appname")}
+                added = 0
+                for item in incoming:
+                    if not isinstance(item, dict):
+                        continue
+                    src = normalize_source(item)
+                    repo = src.get("repo")
+                    name = src.get("appname")
+                    if repo and repo in existing_repos:
+                        continue
+                    if name and name in existing_names:
+                        continue
+                    final_apps.append(item)
+                    if repo:
+                        existing_repos.add(repo)
+                    if name:
+                        existing_names.add(name)
+                    added += 1
+                cur["apps"] = final_apps
+                save_json(APPS_USER, cur)
+            run_check(trigger="import")
+            return self._json({"ok": True, "added": added, "total": len(final_apps)})
 
         return self._err(404, "未知接口")
 

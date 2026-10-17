@@ -320,6 +320,96 @@ function localUnknownRow(app) {
   return row;
 }
 
+function formatNotes(text) {
+  const box = el('div', 'c-notes-body');
+  if (!text) return box;
+  const lines = String(text).split('\n');
+  lines.forEach((line, idx) => {
+    if (idx > 0) box.appendChild(document.createElement('br'));
+    let lastIndex = 0;
+    const re = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+    let m;
+    while ((m = re.exec(line)) !== null) {
+      if (m.index > lastIndex) {
+        box.appendChild(document.createTextNode(line.slice(lastIndex, m.index)));
+      }
+      const a = document.createElement('a');
+      a.textContent = m[1];
+      a.href = m[2];
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      box.appendChild(a);
+      lastIndex = re.lastIndex;
+    }
+    if (lastIndex < line.length) {
+      box.appendChild(document.createTextNode(line.slice(lastIndex)));
+    }
+  });
+  return box;
+}
+
+function cardMenu(app, task, running) {
+  const wrap = el('div', 'c-menu-wrap');
+  const dot = el('span', 'card-menu-btn', '···');
+  dot.setAttribute('role', 'button');
+  dot.setAttribute('tabindex', '0');
+  dot.title = '更多操作';
+  let drop = null;
+  const close = () => { if (drop) { drop.remove(); drop = null; } };
+  dot.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    if (drop) { close(); return; }
+    document.querySelectorAll('.card-menu-dropdown').forEach((d) => d.remove());
+    drop = el('div', 'card-menu-dropdown');
+    // 1. 单独检查
+    const itCheck = el('div', 'card-menu-item', '🔄 检查此应用');
+    itCheck.addEventListener('click', async (e) => {
+      e.stopPropagation(); close();
+      toast('正在检查「' + (app.display || app.appname) + '」最新版本…', '');
+      try {
+        await api('/api/apps/check-one', { method: 'POST', body: { appname: app.appname } });
+        await refresh();
+        toast('已更新「' + (app.display || app.appname) + '」版本信息', 'ok');
+      } catch (err) { toast(err.message, 'err'); }
+    });
+    drop.appendChild(itCheck);
+    // 2. 仓库页面
+    if (app.repo) {
+      const itRepo = el('div', 'card-menu-item', '↗ 访问 GitHub 仓库');
+      itRepo.addEventListener('click', () => {
+        close();
+        if (typeof window !== 'undefined' && window.open) {
+          window.open('https://github.com/' + app.repo, '_blank');
+        }
+      });
+      drop.appendChild(itRepo);
+    }
+    // 3. 从监控列表移除
+    const itDel = el('div', 'card-menu-item danger', '🗑️ 从列表移除');
+    itDel.addEventListener('click', async (e) => {
+      e.stopPropagation(); close();
+      const ok = await askDialog({
+        title: '移除「' + (app.display || app.appname) + '」',
+        notes: ['只会把它从被管理应用列表里去掉，不会卸载应用、也不会删任何文件。'],
+        okText: '移除',
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        await api('/api/apps/remove', { method: 'POST', body: { appname: app.appname } });
+        toast('已从监控列表中移除', 'ok');
+        await refresh();
+      } catch (err) { toast(err.message, 'err'); }
+    });
+    drop.appendChild(itDel);
+    wrap.appendChild(drop);
+  });
+  if (typeof document !== 'undefined') {
+    document.addEventListener('click', close);
+  }
+  return wrap;
+}
+
 function renderCard(app) {
   const task = taskFor(app.appname);
   const running = !!(task && (task.status === 'running' || task.status === 'queued'));
@@ -344,6 +434,7 @@ function renderCard(app) {
   ident.appendChild(el('div', 'c-src', app.repo || app.url || ''));
   head.appendChild(ident);
   head.appendChild(statusBadge(app, task, running));
+  head.appendChild(cardMenu(app, task, running));
   card.appendChild(head);
 
   /* 版本 */
@@ -353,7 +444,7 @@ function renderCard(app) {
   if (app.notes) {
     const d = el('details', 'c-notes');
     d.appendChild(el('summary', '', '更新说明'));
-    d.appendChild(el('div', 'c-notes-body', app.notes));
+    d.appendChild(formatNotes(app.notes));
     card.appendChild(d);
   }
 
@@ -419,6 +510,19 @@ function renderCard(app) {
                                    : ('先下载 ' + app.latest + ' 再安装，一步完成'))));
   bAct.disabled = !needAction || busy;
   actions.appendChild(bAct);
+  if (app.installed && app.service_port) {
+    const port = app.service_port;
+    const proto = (typeof location !== 'undefined' && location.protocol) ? location.protocol : 'http:';
+    const host = (typeof location !== 'undefined' && location.hostname) ? location.hostname : '127.0.0.1';
+    const aOpen = document.createElement('a');
+    aOpen.className = 'btn ghost sm';
+    aOpen.textContent = '打开';
+    aOpen.href = proto + '//' + host + ':' + port;
+    aOpen.target = '_blank';
+    aOpen.rel = 'noopener noreferrer';
+    aOpen.title = '在浏览器新标签页打开该应用（端口 ' + port + '）';
+    actions.appendChild(aOpen);
+  }
   card.appendChild(actions);
 
   return card;
@@ -516,6 +620,8 @@ function notifyFinishedTasks(tasks) {
     toast(nm + '：' + body, t.status === 'ok' ? 'ok' : 'err', 9000);
   });
 }
+
+let searchQuery = '';
 
 function render() {
   const s = state;
@@ -622,7 +728,17 @@ function render() {
        否则每秒重播一次入场动画，界面会持续"闪"。 */
     const firstPaint = !cards.__painted;
     cards.__painted = true;
-    sortApps(apps).forEach((a, i) => {
+    let listToShow = sortApps(apps);
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      listToShow = listToShow.filter((a) => {
+        const d = (a.display || '').toLowerCase();
+        const n = (a.appname || '').toLowerCase();
+        const r = (a.repo || a.url || '').toLowerCase();
+        return d.includes(q) || n.includes(q) || r.includes(q);
+      });
+    }
+    listToShow.forEach((a, i) => {
       const sig = sigOf(a);
       const bag = pool[sig];
       let node = (bag && bag.length) ? bag.shift() : null;
@@ -2026,6 +2142,62 @@ $('apps-reset').addEventListener('click', async () => {
     doCheck($('check-btn'));
   } catch (e) { toast(e.message, 'err'); }
 });
+
+const searchEl = $('search-input');
+if (searchEl) {
+  searchEl.addEventListener('input', (ev) => {
+    searchQuery = (ev.target.value || '').trim();
+    render();
+  });
+}
+
+const expBtn = $('apps-export');
+if (expBtn) {
+  expBtn.addEventListener('click', () => {
+    const list = (state && state.whitelist) || [];
+    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify({
+      version: '1.0',
+      exported_at: new Date().toISOString(),
+      apps: list,
+    }, null, 2));
+    const a = document.createElement('a');
+    a.setAttribute('href', dataStr);
+    a.setAttribute('download', 'fpk-update-apps-backup.json');
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast('已导出应用清单备份文件', 'ok');
+  });
+}
+
+const impBtn = $('apps-import-btn');
+const impFile = $('apps-import-file');
+if (impBtn && impFile) {
+  impBtn.addEventListener('click', () => impFile.click());
+  impFile.addEventListener('change', (ev) => {
+    const file = ev.target.files && ev.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const text = e.target.result;
+        const parsed = JSON.parse(text);
+        const incoming = Array.isArray(parsed) ? parsed : (parsed && parsed.apps);
+        if (!Array.isArray(incoming)) {
+          throw new Error('导入的文件格式不正确（需包含应用数组）');
+        }
+        const r = await api('/api/apps/import', { method: 'POST', body: { apps: incoming, mode: 'merge' } });
+        toast('导入完成：成功合并 ' + r.added + ' 个新应用（当前共 ' + r.total + ' 个）', 'ok');
+        await refresh();
+      } catch (err) {
+        toast('导入失败：' + err.message, 'err');
+      } finally {
+        impFile.value = '';
+      }
+    };
+    reader.readAsText(file);
+  });
+}
 
 /* ── 本应用自身 ── */
 $('sb-update').addEventListener('click', doSelfUpdate);

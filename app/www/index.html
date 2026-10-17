@@ -90,9 +90,14 @@
   </div>
 </div>
 
-<!-- 列表工具条：应用数量 + 排序方式（添加顺序 = 清单原序；字母 = 名称拼音/字母序） -->
+<!-- 列表工具条：应用数量 + 搜索框 + 排序方式 -->
 <div class="listbar hidden" id="listbar">
-  <span class="lb-count" id="lb-count">—</span>
+  <div class="lb-left">
+    <span class="lb-count" id="lb-count">—</span>
+    <div class="lb-search">
+      <input type="search" id="search-input" class="search-input" placeholder="搜索应用或仓库…" aria-label="搜索应用" autocomplete="off" />
+    </div>
+  </div>
   <div class="lb-sort" role="group" aria-label="排序方式">
     <button class="lb-btn" id="sort-added" data-sort="added" title="按添加的先后顺序排列">添加顺序</button>
     <button class="lb-btn" id="sort-alpha" data-sort="alpha" title="按名称的字母/拼音顺序排列">字母</button>
@@ -192,7 +197,10 @@
           </div>
         </div>
 
-        <div class="row">
+        <div class="row apps-ops-row">
+          <button class="btn ghost" id="apps-export" title="导出当前应用监控清单为 JSON 备份文件">导出清单</button>
+          <button class="btn ghost" id="apps-import-btn" title="从 JSON 备份文件导入应用清单">导入清单</button>
+          <input type="file" id="apps-import-file" accept=".json,application/json" hidden />
           <button class="btn ghost" id="apps-reset">清空列表</button>
         </div>
 
