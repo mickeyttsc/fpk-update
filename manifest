@@ -1,5 +1,5 @@
 appname               = fpk-update
-version               = 1.3.4
+version               = 1.3.5
 display_name          = FPK更新
 desc                  = 一个 GitHub 上 fpk 的下载更新器：填个仓库地址，它自己识别版本、后台下载、校验 sha256，你点一下就能装上。已装的应用就地升级；没装的也能在这里直接完整安装（可选存储空间，装好自动启动）。下载可以自动，安装永远由你点。
 maintainer            = Mickey
@@ -12,5 +12,5 @@ ctl_stop              = true
 service_port          = 18600
 desktop_uidir         = ui
 desktop_applaunchname = fpk-update.main
-changelog             = 1.3.4：①信息实时穿透与极速校准：动态核验已安装真实状态，消除安装/卸载后的版本显示滞后；②修复安装后自动清理误判自锁（排除当前任务 ID）；③已安装应用卡片增加「打开」直达入口与「···」独立快捷菜单（单独重检、访问仓库、移除监控）；④增加列表即时搜索过滤框；⑤更新说明 Markdown 链接可直接点击；⑥支持监控清单导出与导入（JSON 备份/恢复）。
+changelog             = 1.3.5：移除卡片上的「打开」按钮，保持卡片单动作按钮的纯粹质感。
 checksum              =

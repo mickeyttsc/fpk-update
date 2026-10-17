@@ -510,19 +510,6 @@ function renderCard(app) {
                                    : ('先下载 ' + app.latest + ' 再安装，一步完成'))));
   bAct.disabled = !needAction || busy;
   actions.appendChild(bAct);
-  if (app.installed && app.service_port) {
-    const port = app.service_port;
-    const proto = (typeof location !== 'undefined' && location.protocol) ? location.protocol : 'http:';
-    const host = (typeof location !== 'undefined' && location.hostname) ? location.hostname : '127.0.0.1';
-    const aOpen = document.createElement('a');
-    aOpen.className = 'btn ghost sm';
-    aOpen.textContent = '打开';
-    aOpen.href = proto + '//' + host + ':' + port;
-    aOpen.target = '_blank';
-    aOpen.rel = 'noopener noreferrer';
-    aOpen.title = '在浏览器新标签页打开该应用（端口 ' + port + '）';
-    actions.appendChild(aOpen);
-  }
   card.appendChild(actions);
 
   return card;
