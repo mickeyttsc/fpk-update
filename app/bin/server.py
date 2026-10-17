@@ -23,6 +23,7 @@
 5. 同一时刻只允许一个升级任务（全局锁），失败不自动重试。
 """
 
+import gc
 import hashlib
 import http.client
 import json
@@ -97,6 +98,22 @@ def log(msg):
     """
     ts = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
     print("[%s] %s" % (ts, msg), flush=True)
+
+
+def prune_log_if_needed(max_bytes=1024 * 1024, keep_lines=1500):
+    """定期修剪运行日志文件，防止长时间挂机后无限膨胀消耗存储与读取性能。"""
+    lp = os.path.join(VAR_DIR, "fpk-update.log")
+    try:
+        if not os.path.isfile(lp) or os.path.getsize(lp) <= max_bytes:
+            return
+        with _lock:
+            with open(lp, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            if len(lines) > keep_lines:
+                with open(lp, "w", encoding="utf-8") as f:
+                    f.writelines(lines[-keep_lines:])
+    except OSError:
+        pass
 
 
 def load_json(path, default=None):
@@ -362,21 +379,37 @@ def token_hint():
 
 GH_CACHE_TTL = 15               # Release 列表缓存秒数
 _gh_cache = {}                  # repo -> (ts, data)
+_gh_rate_limit = {}             # {"limit": 60, "remaining": 58, "reset": 1720000000, "updated_at": ...}
 
 GH_RETRIES = 2                  # 瞬时故障重试次数
 GH_RETRY_WAIT = 0.8             # 首次重试等待（之后线性增长）
 
 
+def gh_rate_limit_info():
+    """返回最近一次与 GitHub API 交互时记录的配额状态。"""
+    with _lock:
+        return dict(_gh_rate_limit)
+
+
+def _record_rate_limit(headers):
+    if not headers:
+        return
+    try:
+        rem = headers.get("x-ratelimit-remaining")
+        lim = headers.get("x-ratelimit-limit")
+        rst = headers.get("x-ratelimit-reset")
+        if rem is not None and lim is not None:
+            with _lock:
+                _gh_rate_limit["limit"] = int(lim)
+                _gh_rate_limit["remaining"] = int(rem)
+                _gh_rate_limit["reset"] = int(rst) if rst else 0
+                _gh_rate_limit["updated_at"] = now_iso()
+    except (TypeError, ValueError):
+        pass
+
+
 def gh_get(url, retries=GH_RETRIES):
-    """请求 GitHub API，瞬时故障自动重试。
-
-    为什么必须有重试：实测遇到过一次「find_release 返回空 → 界面报『仓库没有可用的
-    Release』」，而几秒后完全相同的调用一切正常（GitHub 侧瞬时抖动）。
-    没有重试的话，这种抖动会变成一条**误导用户且会持续到下次检测**的失败状态
-    （错误会被写进 last-check 缓存）。重试把这类抖动挡在用户看不见的地方。
-
-    4xx（除 429）是确定性错误，重试没意义，原样抛给上层翻译成人话。
-    """
+    """请求 GitHub API，瞬时故障自动重试。"""
     last = None
     for attempt in range(retries + 1):
         req = urllib.request.Request(url)
@@ -387,8 +420,10 @@ def gh_get(url, retries=GH_RETRIES):
             req.add_header("Authorization", "token %s" % tok)
         try:
             with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+                _record_rate_limit(r.headers)
                 return json.loads(r.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as exc:
+            _record_rate_limit(getattr(exc, "headers", None))
             if exc.code < 500 and exc.code != 429:
                 raise
             last = exc
@@ -2837,13 +2872,18 @@ def load_settings():
         self_repo = "%s/%s" % (_m.group(1), _m.group(2))
     if self_repo and not REPO_RE.match(self_repo):
         self_repo = ""
+    # 列表视图过滤（全部 vs 仅看可更新）：默认为 all，用户手动切换后永久持久化，绝不自动变动
+    flt = str(data.get("filter") or "all").lower().strip()
+    if flt not in ("all", "update"):
+        flt = "all"
     return {"download_dir": dd, "concurrency": conc, "mirror": mir,
             "auto_download": bool(data.get("auto_download")),
             "auto_clean": bool(auto_clean),
             "clean_keep_current": bool(keep_current),
             "self_repo": self_repo,
             "theme": th,
-            "sort": srt}
+            "sort": srt,
+            "filter": flt}
 
 
 def download_dir():
@@ -3597,6 +3637,7 @@ class Handler(BaseHTTPRequestHandler):
                 "has_token": bool(gh_token()),
                 "token_hint": token_hint(),
                 "token_file": GH_TOKEN_FILE,
+                "gh_rate_limit": gh_rate_limit_info(),
                 "settings": load_settings(),
                 "default_download_dir": DEFAULT_DOWNLOAD_DIR,
                 "mirror_presets": MIRROR_PRESETS,
@@ -3971,6 +4012,11 @@ class Handler(BaseHTTPRequestHandler):
                 if srt not in SORT_CHOICES:
                     return self._err(400, "排序只能是 added / alpha")
                 new["sort"] = srt
+            if "filter" in body:
+                flt = str(body.get("filter") or "").strip().lower()
+                if flt not in ("all", "update"):
+                    return self._err(400, "过滤视图只能是 all / update")
+                new["filter"] = flt
             if "self_repo" in body:
                 rp = str(body.get("self_repo") or "").strip()
                 _m = re.match(r"^https?://github\.com/([^/]+)/([^/?#]+?)(?:\.git)?/?$", rp)
@@ -4305,6 +4351,8 @@ def checker_loop():
     while True:
         try:
             run_check(trigger="auto")
+            prune_log_if_needed()
+            gc.collect()
         except Exception:  # noqa: BLE001
             log("自动检测出错：")
             log(traceback.format_exc())

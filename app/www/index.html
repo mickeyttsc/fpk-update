@@ -90,10 +90,13 @@
   </div>
 </div>
 
-<!-- 列表工具条：应用数量 + 搜索框 + 排序方式 -->
+<!-- 列表工具条：视图过滤（全部 / 可更新）+ 应用数量 + 搜索框 + 排序方式 -->
 <div class="listbar hidden" id="listbar">
   <div class="lb-left">
-    <span class="lb-count" id="lb-count">—</span>
+    <div class="lb-view" role="group" aria-label="列表视图过滤">
+      <button class="lb-btn on" id="view-all" data-view="all" title="显示所有被管理的应用">全部 <span class="lb-badge" id="badge-all">0</span></button>
+      <button class="lb-btn" id="view-update" data-view="update" title="只显示有新版本可更新的应用">可更新 <span class="lb-badge" id="badge-update">0</span></button>
+    </div>
     <div class="lb-search">
       <input type="search" id="search-input" class="search-input" placeholder="搜索应用或仓库…" aria-label="搜索应用" autocomplete="off" />
     </div>
@@ -310,8 +313,16 @@
 
       <!-- ── 其它 ── -->
       <section class="pane" data-pane="misc">
-        <h4>GitHub 访问令牌</h4>
+        <h4>GitHub 访问令牌与 API 额度</h4>
         <p class="set-hint" id="token-state">未设置</p>
+        <div class="quota-card" id="quota-box">
+          <div class="quota-row">
+            <span class="quota-label">API 配额状态</span>
+            <span class="quota-val" id="quota-val">未记录</span>
+          </div>
+          <div class="quota-bar"><i id="quota-fill"></i></div>
+          <div class="quota-hint" id="quota-hint">最近尚未发起 GitHub API 请求</div>
+        </div>
         <div class="row">
           <input type="password" id="token-input" placeholder="粘贴令牌（只读即可，github_pat_… / ghp_…）"
                  autocomplete="off" spellcheck="false">

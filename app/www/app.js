@@ -657,12 +657,22 @@ function render() {
   const cards = $('cards');
   const apps = s.apps || [];
 
-  /* 列表工具条：应用数量 + 当前排序方式（无应用时隐藏） */
+  /* 列表工具条：视图过滤（全部 / 可更新）+ 排序方式（无应用时隐藏） */
   const lb = $('listbar');
   if (lb) {
     lb.classList.toggle('hidden', !apps.length);
-    const lc = $('lb-count');
-    if (lc) lc.textContent = apps.length ? ('共 ' + apps.length + ' 个应用') : '';
+    const nUp = apps.filter((a) => a.update_available).length;
+    const bAll = $('badge-all');
+    if (bAll) bAll.textContent = String(apps.length);
+    const bUp = $('badge-update');
+    if (bUp) bUp.textContent = String(nUp);
+
+    const vMode = (s.settings && s.settings.filter) || 'all';
+    const btnAll = $('view-all');
+    if (btnAll) btnAll.classList.toggle('on', vMode === 'all');
+    const btnUp = $('view-update');
+    if (btnUp) btnUp.classList.toggle('on', vMode === 'update');
+
     const mode = (s.settings && s.settings.sort) || 'added';
     ['added', 'alpha'].forEach((m) => {
       const b = $('sort-' + m);
@@ -716,6 +726,10 @@ function render() {
     const firstPaint = !cards.__painted;
     cards.__painted = true;
     let listToShow = sortApps(apps);
+    const filterMode = (s.settings && s.settings.filter) || 'all';
+    if (filterMode === 'update') {
+      listToShow = listToShow.filter((a) => a.update_available);
+    }
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
       listToShow = listToShow.filter((a) => {
@@ -798,6 +812,30 @@ function syncSettingsPanels(s) {
   renderAppsList(s.whitelist || []);
   renderTaskList(s.tasks || []);
   $('token-state').textContent = s.has_token ? ('当前：已设置 ' + (s.token_hint || '')) : '当前：未设置（走匿名额度）';
+  const qInfo = s.gh_rate_limit || {};
+  const qVal = $('quota-val');
+  const qFill = $('quota-fill');
+  const qHint = $('quota-hint');
+  const qBar = qFill ? qFill.parentElement : null;
+  if (qInfo && qInfo.limit) {
+    const rem = qInfo.remaining !== undefined ? qInfo.remaining : 0;
+    const lim = qInfo.limit || 60;
+    const pct = Math.max(0, Math.min(100, Math.round((rem / lim) * 100)));
+    if (qVal) qVal.textContent = rem + ' / ' + lim + (s.has_token ? '（令牌）' : '（匿名）');
+    if (qFill) qFill.style.width = pct + '%';
+    if (qBar) {
+      qBar.classList.toggle('warn', pct <= 25 && pct > 10);
+      qBar.classList.toggle('danger', pct <= 10);
+    }
+    if (qHint) {
+      const rstTime = qInfo.reset ? new Date(qInfo.reset * 1000).toLocaleTimeString() : '—';
+      qHint.textContent = '重置时间约：' + rstTime + (rem <= 5 ? '（⚠ 配额即将耗尽）' : '');
+    }
+  } else {
+    if (qVal) qVal.textContent = s.has_token ? '5000 次/小时' : '60 次/小时';
+    if (qFill) qFill.style.width = '100%';
+    if (qHint) qHint.textContent = s.has_token ? '已配置访问令牌，额度充裕' : '未配置访问令牌，使用共享匿名配额';
+  }
   const st = s.settings || {};
   const cur = st.download_dir || '—';
   $('dl-state').textContent = '当前：' + cur
@@ -1664,26 +1702,35 @@ async function _doFirstInstallJob(app, pkgReady) {
   }
 }
 
+let idleCycles = 0;
+
 /* ── 轮询：有任务时快轮询，空闲时慢轮询 ── */
 function startPoll() {
   stopPoll();
+  idleCycles = 0;
   const tick = async () => {
     if (typeof document !== 'undefined' && document.hidden) return;   // 后台不轮询
     try {
       await refresh();
       const live = activeTasks();
       const ck = (state && state.checking) || {};
-      // 刚结束的动作要尽快反映到卡片上：结果条是一有任务结果就画的，而卡片主体等下一次轮询 ——
-      // 空闲时轮询是 10 秒一次，于是会出现「上面写着更新完成、下面还显示有新版本」的自相矛盾
-      // （实测用户截图就是这个：更新完成 7 秒后卡片还没翻）。所以结束后的 20 秒内保持 1 秒轮询。
       const justDone = ((state && state.tasks) || []).some((t) => {
         if (!t.finished_at) return false;
         const ts = Date.parse(t.finished_at);
         return !isNaN(ts) && (Date.now() - ts) < 20000;
       });
-      // 有活儿、正在检查、或刚做完 → 1.5s（进度够顺滑，又不至于每秒重绘）；
-      // 空闲 → 15s。配合 refresh() 的「状态没变不重绘」，空闲时几乎零开销。
-      const want = (live.length || ck.running || justDone) ? 1500 : 15000;
+      // 动态自适应退避：
+      // - 活跃期（有任务、检测中、刚结束）：1.5s；
+      // - 刚进入空闲（前 2 分钟）：15s；
+      // - 长期纯空闲（>2 分钟无操作）：拉长至 30s，彻底降温 CPU 与系统唤醒。
+      let want = 1500;
+      if (live.length || ck.running || justDone) {
+        idleCycles = 0;
+        want = 1500;
+      } else {
+        idleCycles++;
+        want = idleCycles > 8 ? 30000 : 15000;
+      }
       if (pollTimer && pollTimer.ms !== want) {
         clearInterval(pollTimer.id);
         pollTimer = { ms: want, id: setInterval(tick, want) };
@@ -1755,6 +1802,27 @@ function setSortMode(mode) {
     toast('排序设置没保存成功：' + e.message, 'err');
   });
 }
+
+/* 视图过滤切换（全部 vs 可更新）：钉住持久化，不手动切换绝不变 */
+function setFilterMode(mode) {
+  if (!state) return;
+  const cur = (state.settings && state.settings.filter) || 'all';
+  if (mode === cur) return;
+  state.settings = state.settings || {};
+  state.settings.filter = mode;
+  render();
+  api('/api/settings', { method: 'POST', body: { filter: mode } }).then((r) => {
+    state.settings.filter = (r.settings && r.settings.filter) || mode;
+    render();
+    toast(mode === 'update' ? '已切换：仅显示可更新应用' : '已切换：显示全部应用', 'ok');
+  }).catch((e) => {
+    state.settings.filter = cur;
+    render();
+    toast('视图设置没保存成功：' + e.message, 'err');
+  });
+}
+$('view-all').addEventListener('click', () => setFilterMode('all'));
+$('view-update').addEventListener('click', () => setFilterMode('update'));
 $('sort-added').addEventListener('click', () => setSortMode('added'));
 $('sort-alpha').addEventListener('click', () => setSortMode('alpha'));
 $('settings-btn').addEventListener('click', openSettings);
