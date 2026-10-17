@@ -549,8 +549,9 @@ try {
     return found;
   };
   const up = actBtns(mk());
-  const okUp = up.length === 1 && up[0].disabled === true;
-  console.log(`  ${okUp ? '✔' : '✘'} 已是最新 → 卡片上只有一个按钮且禁用`);
+  const okUp = up.length === 1 && up[0].disabled === true
+    && up[0].textContent === '已是最新';
+  console.log(`  ${okUp ? '✔' : '✘'} 已是最新 → 只有一个禁用按钮且文案为「已是最新」  -> "${up.map((b) => b.textContent).join('/')}"`);
   if (!okUp) bad++;
 
   const newer = actBtns(mk({ latest: '1.1', update_available: true, relation: 'newer' }));

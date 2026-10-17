@@ -91,6 +91,7 @@ def main():
         "asset_name": "a.fpk", "asset_url": "http://x/a.fpk", "sha256": "a" * 64,
         "size": 1000, "published_at": None, "notes": "", "source_kind": "repo"}
     m.find_release = lambda repo, allow_pre=False, want_tag="", force=False: REL
+    REAL_WIZARD_SPEC = m.wizard_spec_for          # 函数级用例要用真身（下面会被 end-point 用例 stub 掉）
     m.wizard_spec_for = lambda app, rel: {
         "fields": [{"type": "text", "field": "wizard_app_port", "label": "端口",
                     "initValue": "47939",
@@ -393,6 +394,38 @@ def main():
         "没有 wizard 成员的包返回 []（不是 None）")
     chk(m.read_local_fpk_wizard(os.path.join(tmp, "不存在的包.fpk")) is None,
         "读不了的包返回 None（调用方降级）")
+
+    # ── wizard_spec_for 的缓存语义（实测 bug：包下好了仍反复提示先下载）──
+    _orig_lpf = m.local_package_for
+    _orig_probe = m.probe_remote_member
+    try:
+        # ① 缓存里躺着旧的 defer（首次点安装时包还没下完留下的）→ 本地包在手必须胜出
+        m._WIZ_CACHE.clear()
+        m._WIZ_CACHE["http://cache-test|123"] = {"fields": [], "source": "",
+                                                 "defer": True, "local_ready": False}
+        m.local_package_for = lambda a, r: (_wiz_fpk, {"appname": "x", "version": "1.0.0"})
+        _w = REAL_WIZARD_SPEC({"appname": "x", "repo": ""},
+                               {"asset_url": "http://cache-test", "size": 123,
+                                "asset_name": "a.fpk", "sha256": "a" * 64,
+                                "version": "1.0.0", "tag": ""})
+        chk(_w.get("defer") is False and _w.get("source") == "local"
+            and _w.get("local_ready") is True,
+            "本地包在手 → 不被旧的 defer 缓存卡住（bug：已下载仍提示先下载）", _w)
+        # ② 真读不到（无本地包、远端全失败）→ defer，且**不进缓存**
+        m._WIZ_CACHE.clear()
+        m.local_package_for = lambda a, r: (None, None)
+        m.probe_remote_member = lambda *a, **k: None
+        _w2 = REAL_WIZARD_SPEC({"appname": "x", "repo": ""},
+                                {"asset_url": "http://no-local", "size": 999999999,
+                                 "asset_name": "a.fpk", "sha256": "a" * 64,
+                                 "version": "1.0.0", "tag": ""})
+        chk(_w2.get("defer") is True
+            and ("http://no-local|999999999") not in m._WIZ_CACHE,
+            "defer 结果不缓存（否则包下好之后永远卡在「先下载」）", _w2)
+    finally:
+        m.local_package_for = _orig_lpf
+        m.probe_remote_member = _orig_probe
+        m._WIZ_CACHE.clear()
     _, c_vols, _, raw_vols = call("/api/volumes", reps=1)
     _vols = json.loads(raw_vols)
     chk(c_vols == 200 and isinstance(_vols.get("volumes"), list),

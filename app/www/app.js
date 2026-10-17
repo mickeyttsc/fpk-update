@@ -402,7 +402,9 @@ function renderCard(app) {
     || (localReady && normVer(app.downloaded.version) !== normVer(app.installed))
     || !!app.local_unknown;
   const actLabel = app.update_available ? '更新' : '安装';
-  const bAct = btn(actLabel, 'primary sm', () => doAction(app, 'update', actLabel),
+  // 已是最新时按钮文案直接写「已是最新」：写「安装」会让用户以为还能点（截图反馈过）
+  const bAct = btn(upToDate ? '已是最新' : actLabel, 'primary sm',
+    () => doAction(app, 'update', actLabel),
     !app.latest ? '暂无可用版本'
       : (!needAction ? '已是最新，无需操作'
                      : (localReady ? ('用已下好的 ' + app.downloaded.version + ' 安装（不重复下载）')
@@ -663,6 +665,18 @@ function render() {
     showNotice('');
   }
 
+  /* 设置面板的内容只在弹窗打开时同步（首次打开由 openSettings() 补一次），
+     空闲轮询不再每次回填一堆输入框。顶栏版本标签仍每轮更新。 */
+  $('app-ver-chip').textContent = 'v' + (s.app_version || '—');
+  if ($('settings-modal') && !$('settings-modal').classList.contains('hidden')) {
+    syncSettingsPanels(s);
+  }
+}
+
+/* 设置面板的同步（输入框回填 / 只读信息 / 列表渲染）。
+   从 render() 里抽出来：设置弹窗关着时完全不用跑（否则每轮轮询都白做一遍）。
+   打开设置时 openSettings() 会调它一次 —— 所以不会看到旧值。 */
+function syncSettingsPanels(s) {
   /* 设置里的只读信息 */
   $('wl-path').textContent = s.whitelist_file || '—';
   // 本应用的版本：顶栏一个常驻小标签（一眼可见）+ 设置「运行信息」一行（排障时看）
@@ -814,7 +828,6 @@ function renderSummary(s) {
   if (n) bits.push(n + ' 个应用有新版本');
   if (errs) bits.push(errs + ' 个检查失败');
   $('summary-txt').textContent = bits.join(' · ');
-  $('all-update').classList.toggle('hidden', !n);
   $('all-download').classList.toggle('hidden', !n);
 }
 
@@ -1065,8 +1078,15 @@ function busyOff(btn) {
   }
 }
 
+let lastStateSig = '';
 async function refresh() {
-  state = await api('/api/state');
+  const s = await api('/api/state');
+  const sig = JSON.stringify(s);
+  state = s;
+  // 状态一字未变 → 跳过整轮渲染。这是「界面卡卡的」的主要来源之一：
+  // 空闲时每 10~15 秒都会把整个列表重画一遍，其实一个字节都没变。
+  if (sig === lastStateSig) return true;
+  lastStateSig = sig;
   render();
   return true;
 }
@@ -1490,6 +1510,7 @@ async function _doFirstInstallJob(app, pkgReady) {
 function startPoll() {
   stopPoll();
   const tick = async () => {
+    if (typeof document !== 'undefined' && document.hidden) return;   // 后台不轮询
     try {
       await refresh();
       const live = activeTasks();
@@ -1502,23 +1523,34 @@ function startPoll() {
         const ts = Date.parse(t.finished_at);
         return !isNaN(ts) && (Date.now() - ts) < 20000;
       });
-      // 有活儿、正在检查、或刚做完 → 1s；空闲 → 10s
-      const want = (live.length || ck.running || justDone) ? 1000 : 10000;
+      // 有活儿、正在检查、或刚做完 → 1.5s（进度够顺滑，又不至于每秒重绘）；
+      // 空闲 → 15s。配合 refresh() 的「状态没变不重绘」，空闲时几乎零开销。
+      const want = (live.length || ck.running || justDone) ? 1500 : 15000;
       if (pollTimer && pollTimer.ms !== want) {
         clearInterval(pollTimer.id);
         pollTimer = { ms: want, id: setInterval(tick, want) };
       }
     } catch (e) { /* 网络抖动忽略，下一轮再试 */ }
   };
-  pollTimer = { ms: 1000, id: setInterval(tick, 1000) };
+  pollTimer = { ms: 1500, id: setInterval(tick, 1500) };
 }
 
 function stopPoll() {
   if (pollTimer) { clearInterval(pollTimer.id); pollTimer = null; }
 }
 
+/* 页面从后台回到前台：立刻补一次刷新（锁屏回来不该看到 15 秒前的数据） */
+if (typeof document !== 'undefined' && document.addEventListener) {
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refresh().catch(() => {});
+  });
+}
+
 /* ── 设置 ── */
-function openSettings() { openModal($('settings-modal')); }
+function openSettings() {
+  try { if (state) syncSettingsPanels(state); } catch (e) { /* 同步失败不影响打开 */ }
+  openModal($('settings-modal'));
+}
 function closeSettings() { closeModal($('settings-modal')); }
 
 function openAddApp() {
@@ -1636,7 +1668,6 @@ $('speed-save').addEventListener('click', async () => {
 });
 
 /* ── 分页/汇总/列表 ── */
-$('all-update').addEventListener('click', () => doAll('update'));
 $('all-download').addEventListener('click', () => doAll('download'));
 /* 顶栏「一键更新」：与汇总条的「全部更新」同一条链路（含应用内确认弹窗）。 */
 $('update-all-btn').addEventListener('click', () => doAll('update'));

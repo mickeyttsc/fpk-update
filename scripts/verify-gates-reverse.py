@@ -118,6 +118,9 @@ BREAKS = [
     ("清理不再处理本应用自己的安装包",
      "    for it in self_owned_packages():",
      "    for it in []:"),
+    ("wizard 的 defer 结果又被缓存（已下载仍卡提示下载）",
+     '    spec["defer"] = True\n    return dict(spec)',
+     '    _WIZ_CACHE[key] = spec\n    return dict(spec)'),
     ("有本地包也强制重新下载", "        if not known and _local_sha256_cached(cand) != rel[\"sha256\"]:",
      "        if True:"),
     ("共享判定失效（重启后不再认「已装好」）",
@@ -173,6 +176,8 @@ FILE_BREAKS = [
 # 前端破坏用例：(标签, 原文, 改成) —— 跑 render-selftest.js 应当报红
 FE_BREAKS = [
     ("自更新后不再自动刷新界面", "  if (!selfUpdated && bootVersion", "  if (false)"),
+    ("已是最新时按钮又写回「安装」",
+     "btn(upToDate ? '已是最新' : actLabel", "btn(actLabel"),
     ("成功时又留结果条（卡片不回到普通形态）",
      "  if (ok) return null;", "  if (false) return null;"),
     ("卡片改回全量重建（不再复用节点）",

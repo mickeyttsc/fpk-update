@@ -406,9 +406,10 @@ code {
 .modal {
   position: fixed; inset: 0; z-index: 40; display: grid; place-items: center;
   background: rgba(10, 12, 16, .45); padding: 18px; overflow: auto;
-  /* 入场：遮罩淡入（不是"啪"地出现）；退场由 .closing 播完再隐藏（JS 负责时序） */
+  /* 入场：遮罩淡入（不是"啪"地出现）；退场由 .closing 播完再隐藏（JS 负责时序）。
+     ⚠️ 这里**不要**加 backdrop-filter：全屏模糊层再叠动画在手机 webview 上会掉帧，
+     观感反而更差（实测反馈"卡卡的"）。需要压暗时调背景透明度就够了。 */
   animation: m-fade-in .18s ease-out both;
-  backdrop-filter: blur(2px);
 }
 .modal.closing { animation: m-fade-out .15s ease-in both; }
 .modal-card {
@@ -579,6 +580,10 @@ code {
   .topbar {
     padding: 10px max(13px, env(safe-area-inset-left)) 10px max(13px, env(safe-area-inset-right));
     flex-wrap: wrap; row-gap: 9px;
+    /* 手机上 sticky 顶栏 + backdrop-filter 模糊整块重合成，滚动时明显掉帧 ——
+       改成实色背景（视觉几乎无差，滚动顺很多） */
+    background: var(--bg);
+    backdrop-filter: none;
   }
   .brand { min-width: 0; flex: 1 1 100%; }
   .brand-text strong { font-size: 15.5px; }

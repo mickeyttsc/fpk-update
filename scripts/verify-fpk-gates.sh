@@ -215,7 +215,11 @@ fi
 grep -q '"/api/all"' "$TMP/bin/server.py" || fail "后端缺少批量接口 /api/all"
 grep -q '/api/all' "$TMP/www/app.js" || fail "前端没有调用批量接口"
 grep -q 'id="summary"' "$TMP/www/index.html" || fail "缺少顶部汇总条"
-grep -q 'all-update' "$TMP/www/index.html" || fail "缺少「全部更新」按钮"
+# 「全部更新」已并入顶栏「一键更新」（v1.3.2）：两个按钮做同一件事只会让人犹豫
+if grep -q 'id="all-update"' "$TMP/www/index.html"; then
+    fail "汇总条又出现了「全部更新」按钮 —— 顶栏「一键更新」就是它，不要重复"
+fi
+grep -q 'id="update-all-btn"' "$TMP/www/index.html" || fail "缺少顶栏「一键更新」按钮"
 grep -q 'function renderSummary' "$TMP/www/app.js" || fail "缺少汇总条渲染"
 grep -q 'function sortApps' "$TMP/www/app.js" || fail "缺少卡片排序（有更新的排前面）"
 grep -q 'c-notes' "$TMP/www/app.js" || fail "缺少更新说明（changelog）展示"

@@ -834,23 +834,32 @@ def wizard_spec_for(app, rel):
     返回 {fields, source, defer, local_ready}。
     """
     key = "%s|%s" % (rel.get("asset_url") or "", rel.get("size") or "")
+
+    # ① 本地已校验的包：**必须放在缓存之前**。
+    #    实测 bug：第一次点「安装」时包还没下完 → 判定 defer 并进了缓存；包下好之后
+    #    仍然命中旧缓存 → 一直提示「先下载」、点了又提示已下好 → 无法安装。
+    #    本地包在手就是最权威的来源，永远优先；读不到 wizard 成员（[]）也按
+    #    「无参数」处理 —— 不能因为读不到参数表就卡住安装。
+    try:
+        lp, _lmf = local_package_for(app.get("appname") or "", rel)
+        if lp:
+            fl = read_local_fpk_wizard(lp)
+            if fl is None:
+                log("[wizard] 本地包读不出 wizard/install，按「无安装参数」处理：%s" % lp)
+                fl = []
+            spec = {"fields": fl, "source": "local", "defer": False,
+                    "local_ready": True}
+            _WIZ_CACHE[key] = spec
+            return dict(spec)
+    except Exception:  # noqa: BLE001 - 各层都是尽力而为
+        pass
+
+    # 缓存里只允许是「读到了的结果」；defer 绝不缓存（否则会一直卡在提示下载）
     hit = _WIZ_CACHE.get(key)
-    if hit is not None:
+    if hit is not None and not hit.get("defer"):
         return dict(hit)
 
     spec = {"fields": [], "source": "", "defer": False, "local_ready": False}
-
-    # ① 本地已校验的包
-    try:
-        p, _mf = local_package_for(app.get("appname") or "", rel)
-        if p:
-            fl = read_local_fpk_wizard(p)
-            if fl is not None:
-                spec.update(fields=fl, source="local", local_ready=True)
-                _WIZ_CACHE[key] = spec
-                return dict(spec)
-    except Exception:  # noqa: BLE001 - 各层都是尽力而为
-        pass
 
     # ② 远端头部窗口
     try:
@@ -902,8 +911,9 @@ def wizard_spec_for(app, rel):
         except Exception as exc:  # noqa: BLE001
             log("[wizard] 预览下载失败（按 defer 处理）：%s" % exc)
 
+    # 读不到参数表：defer 让前端走「先下载、下好再装」。**不缓存** —— 包下好之后
+    # 下一次调用会先命中①的本地包分支；缓存了 defer 就是这次实锤的「无法安装」。
     spec["defer"] = True
-    _WIZ_CACHE[key] = spec
     return dict(spec)
 
 

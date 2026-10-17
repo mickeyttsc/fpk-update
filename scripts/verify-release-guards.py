@@ -149,6 +149,10 @@ def main():
         (js, "function sortApps", "卡片排序（用户可选：添加顺序 / 字母）"),
         (js, "function openModal", "弹窗统一开关（入场/退场动效）"),
         (js, "firstPaint", "首屏卡片渐次淡入（之后重建不重播）"),
+        # ── v1.3.2：去重「全部更新」/ 已是最新文案 / 轮询与 wizard 缓存修复 ──
+        (js, "upToDate ? '已是最新' : actLabel", "已是最新时按钮如实写「已是最新」"),
+        (js, "if (sig === lastStateSig) return true;", "状态没变不重绘（轮询空转不白干）"),
+        (srv, "defer 绝不缓存", "wizard 的 defer 结果不缓存（否则已下载仍卡提示下载）"),
     ]
     print("▸ 修复点必须还在（%d 项）" % len(REQUIRED))
     for text, needle, label in REQUIRED:
