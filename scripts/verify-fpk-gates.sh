@@ -195,6 +195,11 @@ grep -q '/api/install/wizard\|/api/wizard' "$TMP/bin/server.py" || fail "后端�
 grep -q 'read_local_fpk_wizard' "$TMP/bin/server.py" || fail "后端缺少读向导定义的实现（read_local_fpk_wizard）"
 # 自审修的那几条也要钉住（否则以后会被改回去）
 grep -q 'Cache-Control' "$TMP/bin/server.py" || fail "静态资源缺少 no-cache（升级后可能用旧界面）"
+grep -q 'card sk' "$TMP/www/index.html" || fail "缺少首屏骨架（加载时会先空白再闪出一屏卡片）"
+grep -q 'sk-shimmer' "$TMP/www/style.css" || fail "缺少骨架屏动画"
+grep -q 'm-card-in' "$TMP/www/style.css" || fail "缺少弹窗入场动效（观感突兀）"
+grep -q 'function sortApps' "$TMP/www/app.js" || fail "缺少排序实现"
+grep -q 'def self_owned_packages' "$TMP/bin/server.py" || fail "缺少本应用自有安装包的清理逻辑"
 grep -q 'AUTO_DL_RETRY_SEC' "$TMP/bin/server.py" || fail "自动下载缺少重试退避（坏包会被反复重试）"
 grep -q 'throttled' "$TMP/bin/server.py" || fail "检查缺少节流（连点会烧掉 GitHub 额度）"
 grep -q 'fnOS 应用私有目录' "$TMP/bin/server.py" || fail "下载目录缺少私有目录护栏"

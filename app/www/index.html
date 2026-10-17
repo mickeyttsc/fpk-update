@@ -90,7 +90,40 @@
   </div>
 </div>
 
-<main class="cards" id="cards"></main>
+<!-- 列表工具条：应用数量 + 排序方式（添加顺序 = 清单原序；字母 = 名称拼音/字母序） -->
+<div class="listbar hidden" id="listbar">
+  <span class="lb-count" id="lb-count">—</span>
+  <div class="lb-sort" role="group" aria-label="排序方式">
+    <button class="lb-btn" id="sort-added" data-sort="added" title="按添加的先后顺序排列">添加顺序</button>
+    <button class="lb-btn" id="sort-alpha" data-sort="alpha" title="按名称的字母/拼音顺序排列">字母</button>
+  </div>
+</div>
+
+<main class="cards" id="cards">
+  <!-- 首屏骨架：页面外壳先出来，数据到了再渐次淡入真正的卡片 ——
+       避免"白屏一下 → 突然一屏卡片闪出来"的突兀感（用户反馈）。 -->
+  <div class="card sk" aria-hidden="true">
+    <div class="sk-row"><span class="sk-ico"></span>
+      <span class="sk-lines"><i class="sk-l w40"></i><i class="sk-l w60"></i></span>
+      <span class="sk-chip"></span></div>
+    <div class="sk-vers"><i class="sk-l w30"></i><i class="sk-l w20"></i></div>
+    <div class="sk-bar"></div>
+  </div>
+  <div class="card sk" aria-hidden="true">
+    <div class="sk-row"><span class="sk-ico"></span>
+      <span class="sk-lines"><i class="sk-l w40"></i><i class="sk-l w60"></i></span>
+      <span class="sk-chip"></span></div>
+    <div class="sk-vers"><i class="sk-l w30"></i><i class="sk-l w20"></i></div>
+    <div class="sk-bar"></div>
+  </div>
+  <div class="card sk" aria-hidden="true">
+    <div class="sk-row"><span class="sk-ico"></span>
+      <span class="sk-lines"><i class="sk-l w40"></i><i class="sk-l w60"></i></span>
+      <span class="sk-chip"></span></div>
+    <div class="sk-vers"><i class="sk-l w30"></i><i class="sk-l w20"></i></div>
+    <div class="sk-bar"></div>
+  </div>
+</main>
 
 <footer class="foot">
   <span class="muted">升级走飞牛应用中心官方通道，保数据、不重装。被更新的应用会短暂重启。</span>

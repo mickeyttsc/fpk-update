@@ -2706,6 +2706,8 @@ ACTIONS = {
 #                    而且它是刚下下来的、随时能从 Release 再取。失败时一律保留作回滚包）
 #   theme         —— 界面主题：auto（跟随系统）/ light / dark
 THEME_CHOICES = ("auto", "light", "dark")
+# 应用卡片排序：added=添加的先后顺序（清单原序）；alpha=名称字母/拼音序。
+SORT_CHOICES = ("added", "alpha")
 MIRROR_PRESETS = [
     {"key": "", "label": "直连（默认）", "prefix": ""},
     {"key": "gh-proxy", "label": "gh-proxy.com", "prefix": "https://gh-proxy.com"},
@@ -2733,6 +2735,9 @@ def load_settings():
     th = str(data.get("theme") or "auto").strip().lower()
     if th not in THEME_CHOICES:
         th = "auto"
+    srt = str(data.get("sort") or "added").strip().lower()
+    if srt not in SORT_CHOICES:
+        srt = "added"
     # 装完自动清理安装包（默认开）：装成功了这个包就没用了，而它是刚下下来的、
     # 随时能从 Release 再取。失败/未核验通过时绝不删（保留作回滚包）。
     auto_clean = data.get("auto_clean", True)
@@ -2754,7 +2759,8 @@ def load_settings():
             "auto_clean": bool(auto_clean),
             "clean_keep_current": bool(keep_current),
             "self_repo": self_repo,
-            "theme": th}
+            "theme": th,
+            "sort": srt}
 
 
 def download_dir():
@@ -2942,6 +2948,52 @@ def list_packages():
     return items
 
 
+_SELF_PKG_CACHE = {"at": 0.0, "data": [], "paths": set()}
+
+
+def self_owned_packages():
+    """下载目录里**本应用自己的**安装包（fpk-update-*.fpk，台账之外的那些）。
+
+    为什么单独认领：本应用自己的升级包常从别的渠道进来（手动 curl 后走升级
+    脚本、换机归档…），不在台账里；但它们是**本应用自己的安装器**，留着只占
+    地方 —— 一键清理应当把它们也清掉（别的应用的归档包仍然一个都不动）。
+    判据两条都满足才认：① 文件名 fpk-update-*.fpk；② 包内 manifest 的
+    appname == 本应用（读不出来就不认领 —— 宁可不删，不可误删）。
+    结果缓存 5 秒：这个函数会被 /api/state 的轮询路径带到，不能每次轮询都读包。
+    """
+    now = time.monotonic()
+    if now - _SELF_PKG_CACHE["at"] < 5:
+        return _SELF_PKG_CACHE["data"]
+    owned = {os.path.realpath(i["path"]) for i in list_packages()}
+    out = []
+    try:
+        d = os.path.realpath(download_dir())
+        names = sorted(os.listdir(d))
+    except OSError:
+        names = []
+    prefix = APP_NAME + "-"
+    for nm in names:
+        if not nm.lower().endswith(".fpk") or not nm.startswith(prefix):
+            continue
+        p = os.path.join(d, nm)
+        if os.path.islink(p) or not os.path.isfile(p) or os.path.realpath(p) in owned:
+            continue
+        try:
+            mf = read_local_fpk_manifest(p)
+        except Exception:  # noqa: BLE001 - 读不出来就不认领
+            continue
+        if mf.get("appname") != APP_NAME:
+            continue
+        try:
+            sz = os.path.getsize(p)
+        except OSError:
+            continue
+        out.append({"name": nm, "size": sz, "path": p})
+    _SELF_PKG_CACHE.update({"at": now, "data": out,
+                            "paths": {os.path.realpath(i["path"]) for i in out}})
+    return out
+
+
 def foreign_packages():
     """下载目录里本应用**不会动**的安装包（直接扫目录，只用于如实告知用户）。
 
@@ -2951,6 +3003,9 @@ def foreign_packages():
     实测：目录里一份 357MB 的 Ekko 包就这样「隐身」过。
     """
     owned = {os.path.realpath(i["path"]) for i in list_packages()}
+    # 自己的安装包单独归一类（会被一键清理删掉）——不能混进「不会动」名单里误导用户
+    self_paths = set(_SELF_PKG_CACHE["paths"]) if _SELF_PKG_CACHE["paths"] else \
+        {os.path.realpath(i["path"]) for i in self_owned_packages()}
     out = []
     try:
         d = os.path.realpath(download_dir())
@@ -2962,6 +3017,8 @@ def foreign_packages():
             continue
         p = os.path.join(d, nm)
         if os.path.islink(p) or not os.path.isfile(p) or os.path.realpath(p) in owned:
+            continue
+        if os.path.realpath(p) in self_paths:
             continue
         try:
             sz = os.path.getsize(p)
@@ -2977,10 +3034,12 @@ def package_summary():
     stale = [i for i in items if not (keep and i.get("current"))]
     kept = [i for i in items if keep and i.get("current")]
     fgn = foreign_packages()
+    slf = self_owned_packages()
     parts = [p for p in orphan_parts() if p["old_enough"]]
     return {"count": len(stale), "size": sum(i["size"] for i in stale),
             "keep_count": len(kept), "keep_size": sum(i["size"] for i in kept),
             "foreign_count": len(fgn), "foreign_size": sum(i["size"] for i in fgn),
+            "self_count": len(slf), "self_size": sum(i["size"] for i in slf),
             "parts_count": len(parts), "parts_size": sum(p["size"] for p in parts)}
 
 
@@ -3069,6 +3128,39 @@ def _safe_unlink(path):
     return True, ""
 
 
+def _safe_unlink_self(path):
+    """删「本应用自己的安装包」（台账之外那批，例如手动 curl 下来走升级脚本的）。
+
+    与 _safe_unlink 的区别只有一条：**不要求台账**——但身份判据更硬：文件名必须
+    是 `<本应用名>-*.fpk`，且**包内 manifest 的 appname 必须等于本应用**；读不出来
+    一律不删。其余护栏（符号链接 / 下载目录直属 / 占用中）与 _safe_unlink 一致。
+    这样即使调用方传错路径，删掉的也只可能是本应用自己的安装器。
+    """
+    if os.path.islink(str(path or "")):
+        return False, "这是符号链接，拒绝删除"
+    p = os.path.realpath(str(path or ""))
+    if not p or not os.path.isabs(p):
+        return False, "路径不合法"
+    base = os.path.basename(p)
+    if not base.startswith(APP_NAME + "-") or not base.lower().endswith(".fpk"):
+        return False, "不是本应用自己的安装包"
+    if os.path.dirname(p) != os.path.realpath(download_dir()):
+        return False, "不在当前的安装包下载目录里，拒绝删除"
+    if not os.path.isfile(p):
+        return False, "文件不存在"
+    if _package_in_use(p):
+        return False, "正被进行中的任务使用，请稍后再试"
+    try:
+        mf = read_local_fpk_manifest(p)
+    except Exception:  # noqa: BLE001
+        return False, "读不出包内 manifest，拒绝删除"
+    if mf.get("appname") != APP_NAME:
+        return False, "包内应用名不是本应用，拒绝删除"
+    os.unlink(p)
+    forget_package(p)          # 台账里若有残留记录一并清掉
+    return True, ""
+
+
 def clean_packages(include_current=None):
     """一键清理：删掉「用不上的」安装包 + 残留的下载中间文件。
 
@@ -3091,6 +3183,17 @@ def clean_packages(include_current=None):
             freed += it["size"]
         else:
             failed.append({"name": it["name"], "reason": why})
+    # 本应用自己的旧安装器：一并清掉（不受 keep_current 限制 —— 那是给被管理应用的
+    # 回滚包用的；自己的安装器随时能从自己的 Release 重新下载）
+    self_deleted, self_freed = [], 0
+    for it in self_owned_packages():
+        ok, why = _safe_unlink_self(it["path"])
+        if ok:
+            self_deleted.append(it["name"])
+            self_freed += it["size"]
+        else:
+            failed.append({"name": it["name"], "reason": why})
+    _SELF_PKG_CACHE.update({"at": 0.0, "data": [], "paths": set()})   # 让缓存立刻失效
     parts, parts_freed = [], 0
     for it in orphan_parts():
         if not it["old_enough"]:
@@ -3102,7 +3205,8 @@ def clean_packages(include_current=None):
         else:
             failed.append({"name": it["name"], "reason": why})
     return {"deleted": deleted, "kept": kept, "failed": failed, "freed": freed,
-            "parts": parts, "parts_freed": parts_freed}
+            "parts": parts, "parts_freed": parts_freed,
+            "self_deleted": self_deleted, "self_freed": self_freed}
 
 
 def clean_after_install(appname, fpk_path, target_version):
@@ -3679,6 +3783,7 @@ class Handler(BaseHTTPRequestHandler):
             items = [i for i in all_items if include_current or not i.get("current")]
             kept_items = [i for i in all_items if not include_current and i.get("current")]
             fgn = foreign_packages()
+            self_items = self_owned_packages()      # 本应用自己的旧安装器（会被一起清）
             parts = [p for p in orphan_parts() if p["old_enough"]]
             extra = {"keep_count": len(kept_items),
                      "keep_size": sum(i["size"] for i in kept_items),
@@ -3686,10 +3791,13 @@ class Handler(BaseHTTPRequestHandler):
                      "foreign_count": len(fgn),
                      "foreign_size": sum(i["size"] for i in fgn),
                      "foreign": [i["name"] for i in fgn],
+                     "self_count": len(self_items),
+                     "self_size": sum(i["size"] for i in self_items),
+                     "self": [i["name"] for i in self_items],
                      "parts": [p["name"] for p in parts],
                      "parts_count": len(parts),
                      "parts_size": sum(p["size"] for p in parts)}
-            if not items and not parts:
+            if not items and not parts and not self_items:
                 return self._json({"ok": True, "dry": bool(body.get("dry")),
                                    "items": [], "count": 0, "size": 0,
                                    "deleted": [], "failed": [], "freed": 0, **extra})
@@ -3698,10 +3806,13 @@ class Handler(BaseHTTPRequestHandler):
                                    "count": len(items),
                                    "size": sum(i["size"] for i in items), **extra})
             res = clean_packages(include_current=include_current)
-            log("[清理] 删除 %d 个安装包（%s）与 %d 个下载残留，释放 %s；保留 %d 个当前版本；未删 %d 个"
+            log("[清理] 删除 %d 个安装包（%s）与 %d 个下载残留、%d 个本应用自己的安装器，释放 %s；"
+                "保留 %d 个当前版本；未删 %d 个"
                 % (len(res["deleted"]), ",".join(res["deleted"]) or "-",
                    len(res.get("parts") or []),
-                   _human(res["freed"] + res.get("parts_freed", 0)),
+                   len(res.get("self_deleted") or []),
+                   _human(res["freed"] + res.get("parts_freed", 0)
+                          + res.get("self_freed", 0)),
                    len(res.get("kept") or []), len(res["failed"])))
             return self._json({"ok": True, "dry": False,
                                "count": len(res["deleted"]),
@@ -3710,6 +3821,8 @@ class Handler(BaseHTTPRequestHandler):
                                "kept": res.get("kept") or [],
                                "parts_deleted": res.get("parts") or [],
                                "parts_freed": res.get("parts_freed", 0),
+                               "self_deleted": res.get("self_deleted") or [],
+                               "self_freed": res.get("self_freed", 0),
                                "failed": res["failed"], "freed": res["freed"], **extra})
 
         if path == "/api/job/dismiss":
@@ -3747,6 +3860,11 @@ class Handler(BaseHTTPRequestHandler):
                 if th not in THEME_CHOICES:
                     return self._err(400, "主题只能是 auto / light / dark")
                 new["theme"] = th
+            if "sort" in body:
+                srt = str(body.get("sort") or "").strip().lower()
+                if srt not in SORT_CHOICES:
+                    return self._err(400, "排序只能是 added / alpha")
+                new["sort"] = srt
             if "self_repo" in body:
                 rp = str(body.get("self_repo") or "").strip()
                 _m = re.match(r"^https?://github\.com/([^/]+)/([^/?#]+?)(?:\.git)?/?$", rp)

@@ -142,6 +142,13 @@ def main():
         (srv, "def default_volume", "系统默认安装卷（读 appcenter-cli default-volume）"),
         (js, "function doFirstInstall", "前端完整安装流程（参数表 + 存储空间 + 入队）"),
         (js, "cf-field-err", "安装对话框的字段级校验错误提示"),
+        # ── v1.3.1：排序 / 观感动效 / 清理自有安装包 ──
+        (srv, "def self_owned_packages", "本应用自己的安装包被认领（一键清理会删）"),
+        (srv, "def _safe_unlink_self", "自有包的删除护栏（包内 appname 必须为本应用）"),
+        (srv, '"self_count"', "清理清单把自有包报给界面"),
+        (js, "function sortApps", "卡片排序（用户可选：添加顺序 / 字母）"),
+        (js, "function openModal", "弹窗统一开关（入场/退场动效）"),
+        (js, "firstPaint", "首屏卡片渐次淡入（之后重建不重播）"),
     ]
     print("▸ 修复点必须还在（%d 项）" % len(REQUIRED))
     for text, needle, label in REQUIRED:
@@ -166,6 +173,10 @@ def main():
             "页面里有自身区块骨架（#selfbar / #sb-update / #sb-state）")
         chk('id="self-repo-input"' in html,
             "设置里能改自身更新来源（#self-repo-input）")
+        chk('id="listbar"' in html and 'id="sort-alpha"' in html,
+            "页面里有排序工具条（#listbar / #sort-alpha）")
+        chk('class="card sk"' in html,
+            "页面里有首屏骨架卡（数据到达前不空白，避免闪出）")
         # 交付的默认列表里**不能**有本应用自己（等于把自己当普通应用管理）
         apps_json = read(os.path.join(outer, "config", "apps.json")) or \
             read(os.path.join(app, "..", "config", "apps.json"))

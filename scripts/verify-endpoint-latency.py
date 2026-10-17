@@ -320,6 +320,34 @@ def main():
                 if x.get("appname") == "not-yet-app" and x.get("action") == "install"), {})
     chk(_t3.get("params") == {"wizard_app_port": "48080", "wizard_on": "true"},
         "参数原样带进任务（布尔归一成 true/false）", _t3.get("params"))
+    # ── 一键清理：本应用自己的安装包也要删（台账之外的 fpk-update-*.fpk）──
+    import tarfile as _tf2
+    _self_pkg = os.path.join(dl, "fpk-update-9.9.9.fpk")
+    with _tf2.open(_self_pkg, "w:gz") as tf:
+        _md = b"appname               = fpk-update\nversion               = 9.9.9\n"
+        _ti = _tf2.TarInfo("manifest")
+        _ti.size = len(_md)
+        tf.addfile(_ti, io.BytesIO(_md))
+    m._SELF_PKG_CACHE.update({"at": 0.0, "data": [], "paths": set()})   # 让缓存立刻失效
+    _, c_dry, _, raw_dry = call("/api/clean", {"dry": True}, reps=1)
+    _dr = json.loads(raw_dry)
+    chk(c_dry == 200 and _dr.get("self_count", 0) >= 1
+        and "fpk-update-9.9.9.fpk" in (_dr.get("self") or []),
+        "清理清单里能看到本应用自己的安装包", (_dr.get("self_count"), _dr.get("self")))
+    _, c_cl, _, raw_cl = call("/api/clean", {}, reps=1)
+    _cl = json.loads(raw_cl)
+    chk(c_cl == 200 and "fpk-update-9.9.9.fpk" in (_cl.get("self_deleted") or []),
+        "一键清理真的删掉了本应用自己的安装包", _cl.get("self_deleted"))
+    chk(not os.path.exists(_self_pkg), "那个文件确实没了")
+
+    # 排序设置：只能 added / alpha（写进设置、界面按它重排）
+    _, c_sort1, _, raw_sort1 = call("/api/settings", {"sort": "alpha"}, reps=1)
+    _s1 = json.loads(raw_sort1).get("settings") or {}
+    chk(c_sort1 == 200 and _s1.get("sort") == "alpha", "排序设置 alpha 生效", _s1.get("sort"))
+    _, c_sort2, _, _ = call("/api/settings", {"sort": "bogus"}, reps=1)
+    chk(c_sort2 == 400, "非法排序值被拒（只能 added / alpha）", c_sort2)
+    call("/api/settings", {"sort": "added"}, reps=1)      # 还原默认，别影响后面的用例
+
     # /api/wizard：参数表接口（stub 掉网络层，验证可渲染结构）
     _, c_wz, _, raw_wz = call("/api/wizard?appname=not-yet-app", reps=1)
     _wzs = json.loads(raw_wz)

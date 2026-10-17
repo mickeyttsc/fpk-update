@@ -10,8 +10,10 @@
 用法：python3 scripts/verify-clean-safety.py [app/bin/server.py]
 """
 import importlib.util
+import io
 import os
 import sys
+import tarfile
 import tempfile
 
 BAD = 0
@@ -91,6 +93,40 @@ def main():
         "一键清理不会顺手删掉外来包")
     os.remove(os.path.join(var, "last-check.json"))
     # 上面那次清理已经把台账里的包删了 —— 重新放回去，后面的用例还要用它
+    mine = touch(os.path.join(dl, "cliproxyapi-8.0.31-1.fpk"))
+    s.record_package(mine, "cliproxyapi", "8.0.31-1", os.path.getsize(mine), "a" * 64)
+
+    print("▸ 本应用自己的安装包（台账之外的那批）：该删的删、冒名的拒删")
+    def _mk_fpk(path, appname):
+        """造一只最小 fpk（tar.gz 里只放一条 manifest 成员）。"""
+        with tarfile.open(path, "w:gz") as tf:
+            md = ("appname               = %s\nversion               = 9.9.9\n"
+                  % appname).encode()
+            ti = tarfile.TarInfo("manifest")
+            ti.size = len(md)
+            tf.addfile(ti, io.BytesIO(md))
+
+    own = os.path.join(dl, "fpk-update-9.9.9.fpk")
+    _mk_fpk(own, "fpk-update")
+    s._SELF_PKG_CACHE.update({"at": 0.0, "data": [], "paths": set()})
+    chk([i["name"] for i in s.self_owned_packages()] == ["fpk-update-9.9.9.fpk"],
+        "自己的安装包被认领（台账之外也算）")
+    chk(own not in [i["name"] for i in s.foreign_packages()],
+        "自己的包不算「不会动」的外来包")
+    r = s.clean_packages()
+    chk("fpk-update-9.9.9.fpk" in (r["self_deleted"] or []) and not os.path.isfile(own),
+        "一键清理会删掉本应用自己的安装包", r.get("self_deleted"))
+    # 反例：名字像我们的，但包里 appname 不是本应用 → 必须拒绝
+    fake = os.path.join(dl, "fpk-update-8.0.0.fpk")
+    _mk_fpk(fake, "someone-else")
+    s._SELF_PKG_CACHE.update({"at": 0.0, "data": [], "paths": set()})
+    chk("fpk-update-8.0.0.fpk" not in [i["name"] for i in s.self_owned_packages()],
+        "冒名包不被认领为「自己的」")
+    ok, why = s._safe_unlink_self(fake)
+    chk((not ok) and os.path.isfile(fake), "冒名包拒删（包内 appname 不是本应用）", why)
+    os.remove(fake)
+    # 刚才那次 clean_packages 顺带把台账里的包也删了 —— 按上面的约定重新放回去，
+    # 后面的「一键清理：删对的、留别的」还要用它
     mine = touch(os.path.join(dl, "cliproxyapi-8.0.31-1.fpk"))
     s.record_package(mine, "cliproxyapi", "8.0.31-1", os.path.getsize(mine), "a" * 64)
 

@@ -263,6 +263,23 @@ socket：`/var/run/com.trim.app.center.sock`（`root:root`，组 `OfficialAppUse
   · AST 门禁要求 subprocess 第一个参数是**字面量列表** → 带 `-e` 与不带 `-e`
     写成两个分支的调用（拼变量会让门禁无法静态判定）。
 
+- **卡片排序（v1.3.1）**：两种模式存服务端 `settings.sort` —— `added` = 清单原序
+  （**不按更新状态重排**：用户要的是稳定的「先后顺序」，之前默认按「跑着的→有更新的→
+  正常」置顶，列表顺序会自己乱跳）；`alpha` = `localeCompare('zh')` 拼音序。断言在
+  渲染自测里（含「缺省 = 添加顺序」「有更新也不许偷偷置顶」）。
+- **观感动效的时序规则（v1.3.1）**：弹窗一律走 `openModal/closeModal` —— 退场动画
+  150ms 后才真正 hidden，`_closeTimers` 会取消未完成的关闭定时器（否则快速重开会
+  「刚打开又被上一次的定时器关掉」）；首屏卡片 `.enter` **只给第一次数据**（轮询会
+  因进度变化重建卡片，带动画就是每秒闪）；`prefers-reduced-motion` 全关。骨架屏在
+  index.html 里静态铺 3 张，数据到达后被差分渲染自然清掉（这批骨架卡没有 `__sig`，
+  不会被池子复用）。
+- **本应用自己的安装包也纳入清理（v1.3.1）**：台账之外的 `fpk-update-*.fpk`（手动
+  curl 后走升级脚本进来的那批）以前落在 foreign 里「不会动」、越积越多；现在由
+  `self_owned_packages()` 认领（文件名前缀 + **包内 manifest 的 appname 必须等于
+  本应用**），删除走专用护栏 `_safe_unlink_self`（不要求台账，但双判据 + 目录/符号
+  链接/占用检查一样不少，读不出 manifest 一律不删）。结果缓存 5 秒 —— 该函数会被
+  `/api/state` 的轮询路径带到，不能每次轮询都读包。
+
 ## 打包者
 
 Mickey · 本项目为自用打包。

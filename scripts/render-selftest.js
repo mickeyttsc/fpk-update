@@ -230,20 +230,31 @@ try {
 }
 
 console.log('────────────────────────────────────────');
-console.log('▸ 排序（对标应用商店：正在动 → 有新版本 → 正常）');
+console.log('▸ 排序（用户可选：添加顺序 / 字母）');
 try {
-  sandbox.__setState({ tasks: [{ id: 'x', appname: 'zzz', action: 'download', status: 'running' }] });
   const input = [
-    { appname: 'aaa', display: 'AAA', update_available: false, latest: '1.0', error: null },
-    { appname: 'mmm', display: 'MMM', update_available: true, latest: '2.0', error: null },
-    { appname: 'zzz', display: 'ZZZ', update_available: false, latest: '1.0', error: null },
-    { appname: 'bbb', display: 'BBB', update_available: true, latest: '2.0', error: null },
+    { appname: 'zeta', display: 'Zeta', update_available: false, latest: '1.0', error: null },
+    { appname: 'alpha', display: 'Alpha', update_available: true, latest: '2.0', error: null },
+    { appname: 'mid', display: 'Mid', update_available: false, latest: '1.0', error: null },
   ];
-  const got = sandbox.__sortApps(input).map((a) => a.appname);
-  const want = ['zzz', 'bbb', 'mmm', 'aaa'];   // zzz 在跑；bbb/mmm 有更新（按名）；aaa 正常
-  const ok = JSON.stringify(got) === JSON.stringify(want);
-  console.log('  ' + (ok ? '✔' : '✘') + ' 得到 ' + JSON.stringify(got) + (ok ? '' : '，期望 ' + JSON.stringify(want)));
-  if (!ok) bad++;
+  // 添加顺序：原样（服务端 apps 数组 = 清单顺序）——哪怕有更新也不许偷偷置顶
+  sandbox.__setState({ tasks: [], settings: { sort: 'added' } });
+  const gotA = sandbox.__sortApps(input).map((a) => a.appname);
+  const okA = JSON.stringify(gotA) === JSON.stringify(['zeta', 'alpha', 'mid']);
+  console.log('  ' + (okA ? '✔' : '✘') + ' 添加顺序 → 保持清单原序（不按更新状态重排）  -> ' + JSON.stringify(gotA));
+  if (!okA) bad++;
+  // 字母：按显示名
+  sandbox.__setState({ tasks: [], settings: { sort: 'alpha' } });
+  const gotB = sandbox.__sortApps(input).map((a) => a.appname);
+  const okB = JSON.stringify(gotB) === JSON.stringify(['alpha', 'mid', 'zeta']);
+  console.log('  ' + (okB ? '✔' : '✘') + ' 字母排序 → Alpha/Mid/Zeta  -> ' + JSON.stringify(gotB));
+  if (!okB) bad++;
+  // 缺省（没有 settings）→ 按添加顺序
+  sandbox.__setState({ tasks: [] });
+  const gotC = sandbox.__sortApps(input).map((a) => a.appname);
+  const okC = JSON.stringify(gotC) === JSON.stringify(['zeta', 'alpha', 'mid']);
+  console.log('  ' + (okC ? '✔' : '✘') + ' 没设置过 → 默认添加顺序  -> ' + JSON.stringify(gotC));
+  if (!okC) bad++;
 } catch (e) {
   console.log('  ✘ sortApps 抛异常 -> ' + e.message);
   bad++;
@@ -819,10 +830,13 @@ try {
     console.log(`  ${okRender ? '✔' : '✘'} 按传入内容渲染（标题/版本行/说明/按钮文案）`);
     if (!okRender) bad++;
     okBtn._fire('click');
+    const closing = sandbox.__els('confirm-modal').classList.contains('closing');
     const yes = await p1;
+    await new Promise((r) => setTimeout(r, 200));   // 退场动画播完（150ms）后才真正 hidden
     const closed = sandbox.__els('confirm-modal').classList.contains('hidden');
-    console.log(`  ${yes === true && closed ? '✔' : '✘'} 点「确定」→ resolve(true) 且弹窗关闭`);
-    if (!(yes === true && closed)) bad++;
+    console.log(`  ${yes === true && closed ? '✔' : '✘'} 点「确定」→ resolve(true)，退场动画后关闭`
+      + (closing ? '（含 .closing）' : '（缺 .closing 动画）'));
+    if (!(yes === true && closed && closing)) bad++;
 
     const p2 = sandbox.__askDialog({ title: '清理安装包', danger: true, okText: '清理' });
     const danger = sandbox.__els('cf-ok').classList.contains('danger');

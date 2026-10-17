@@ -183,6 +183,63 @@ code {
 .summary .s-txt { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 500; word-break: break-word; }
 .summary .s-actions { display: flex; gap: 8px; flex: none; }
 
+/* ── 首屏骨架 & 卡片入场（观感：窗口先出来，内容慢慢浮现） ── */
+.card.sk { pointer-events: none; }
+.card.sk .sk-row { display: flex; align-items: center; gap: 10px; }
+.card.sk .sk-ico { width: 42px; height: 42px; border-radius: 10px; flex: none; }
+.card.sk .sk-lines { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.card.sk .sk-vers { display: flex; gap: 10px; margin-top: 12px; }
+.card.sk .sk-bar { height: 8px; border-radius: 6px; margin-top: 12px; }
+.card.sk .sk-l { display: block; height: 10px; border-radius: 6px; }
+.card.sk .w20 { width: 20%; } .card.sk .w30 { width: 30%; }
+.card.sk .w40 { width: 40%; } .card.sk .w60 { width: 60%; }
+.card.sk .sk-chip { width: 52px; height: 20px; border-radius: 999px; flex: none; }
+.card.sk .sk-ico, .card.sk .sk-l, .card.sk .sk-chip, .card.sk .sk-bar {
+  background: linear-gradient(100deg, var(--line-soft) 30%,
+    color-mix(in srgb, var(--fg) 8%, var(--line-soft)) 50%, var(--line-soft) 70%);
+  background-size: 220% 100%;
+  animation: sk-shimmer 1.15s ease-in-out infinite;
+}
+@keyframes sk-shimmer { from { background-position: 120% 0; } to { background-position: -40% 0; } }
+.card.enter { animation: card-in .32s cubic-bezier(.16, 1, .3, 1) both; }
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+/* 面板从隐藏切到显示时淡入（列表工具条 / 本应用区块 / 汇总条） */
+.selfbar:not(.hidden), .summary:not(.hidden), .listbar:not(.hidden) {
+  animation: fade-in .22s ease-out both;
+}
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .card.enter, .selfbar:not(.hidden), .summary:not(.hidden), .listbar:not(.hidden),
+  .card.sk .sk-ico, .card.sk .sk-l, .card.sk .sk-chip, .card.sk .sk-bar { animation: none; }
+}
+
+/* ── 列表工具条：应用数量 + 排序方式 ── */
+.listbar {
+  max-width: 1240px; margin: 14px auto 0; padding: 0 16px;
+  display: flex; align-items: center; gap: 12px;
+  margin-left: 16px; margin-right: 16px;
+}
+@media (min-width: 1272px) { .listbar { margin-left: auto; margin-right: auto; } }
+.listbar .lb-count { flex: 1; min-width: 0; font-size: 12.5px; color: var(--fg-muted); }
+.lb-sort {
+  display: flex; gap: 3px; padding: 3px; flex: none;
+  background: var(--line-soft); border-radius: 10px;
+}
+.lb-btn {
+  appearance: none; border: none; background: transparent; cursor: pointer;
+  font: inherit; font-size: 12.5px; font-weight: 500; color: var(--fg-muted);
+  padding: 5px 10px; border-radius: 8px;
+  transition: background .15s, color .15s, box-shadow .15s;
+}
+.lb-btn:hover { color: var(--fg); }
+.lb-btn.on {
+  background: var(--bg-soft); color: var(--fg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .08);
+}
+
 /* ── 更新说明（对标应用商店的 changelog） ── */
 .c-notes { font-size: 12.5px; }
 .c-notes > summary {
@@ -349,6 +406,28 @@ code {
 .modal {
   position: fixed; inset: 0; z-index: 40; display: grid; place-items: center;
   background: rgba(10, 12, 16, .45); padding: 18px; overflow: auto;
+  /* 入场：遮罩淡入（不是"啪"地出现）；退场由 .closing 播完再隐藏（JS 负责时序） */
+  animation: m-fade-in .18s ease-out both;
+  backdrop-filter: blur(2px);
+}
+.modal.closing { animation: m-fade-out .15s ease-in both; }
+.modal-card {
+  animation: m-card-in .22s cubic-bezier(.16, 1, .3, 1) both;
+}
+.modal.closing .modal-card { animation: m-card-out .15s ease-in both; }
+@keyframes m-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes m-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes m-card-in {
+  from { opacity: 0; transform: translateY(10px) scale(.97); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes m-card-out {
+  from { opacity: 1; transform: none; }
+  to   { opacity: 0; transform: translateY(6px) scale(.985); }
+}
+/* 系统开启「减少动态效果」时不播动画（无障碍），退场仍由 JS 定时隐藏 */
+@media (prefers-reduced-motion: reduce) {
+  .modal, .modal.closing, .modal-card, .modal.closing .modal-card { animation: none; }
 }
 .modal-card {
   width: 100%; max-width: 380px; background: var(--bg-soft);
@@ -452,6 +531,7 @@ code {
 .picker {
   margin-top: 10px; padding: 12px; border: 1px solid var(--line);
   border-radius: 12px; background: var(--bg);
+  animation: m-card-in .2s cubic-bezier(.16, 1, .3, 1) both;
 }
 .selwrap { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; }
 .selwrap > span { color: var(--fg-muted); font-size: 13px; flex: none; min-width: 52px; }
@@ -515,6 +595,10 @@ code {
     flex: 1 1 auto; min-width: 0; height: 36px;
     padding: 0 14px; border-radius: 10px; font-size: 13px;
   }
+
+  /* 列表工具条与卡片边距对齐 */
+  .listbar { margin: 10px 13px 0; padding: 0; }
+  .lb-btn { padding: 5px 9px; font-size: 12px; }
 
   /* 提示条与卡片边距严格对齐（13px） */
   .notice { margin: 10px 13px 0; padding: 10px 13px; font-size: 13px; border-radius: 12px; }

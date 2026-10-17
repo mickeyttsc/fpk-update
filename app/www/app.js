@@ -141,20 +141,19 @@ function activeTasks() {
 }
 
 /* 排序：正在动的 → 有新版本的 → 检查失败的 → 正常的；同级按名字 */
+/* 卡片排序：两种模式（用户选择，存在服务端设置里）。
+   · added：**添加的先后顺序** —— 服务端 apps 数组本来就是清单顺序，原样返回；
+   · alpha：按显示名的字母/拼音序 —— localeCompare('zh') 在浏览器里就是拼音序。
+   注意别再偷偷塞「正在跑的/有更新的置顶」：用户选了什么就是什么，不然「顺序」
+   会莫名其妙地变，找东西反而更费劲。 */
 function sortApps(list) {
-  const rank = (a) => {
-    const t = taskFor(a.appname);
-    if (t && (t.status === 'running' || t.status === 'queued')) return 0;
-    if (a.update_available) return 1;
-    if (a.error && !a.latest) return 3;
-    return 2;
-  };
-  return list.slice().sort((a, b) => {
-    const r = rank(a) - rank(b);
-    if (r) return r;
-    return String(a.display || a.appname || '')
-      .localeCompare(String(b.display || b.appname || ''), 'zh');
-  });
+  const mode = (state && state.settings && state.settings.sort) || 'added';
+  const arr = list.slice();
+  if (mode === 'alpha') {
+    arr.sort((a, b) => String(a.display || a.appname || '')
+      .localeCompare(String(b.display || b.appname || ''), 'zh'));
+  }
+  return arr;
 }
 
 /* ── 小组件 ── */
@@ -555,6 +554,19 @@ function render() {
   const cards = $('cards');
   const apps = s.apps || [];
 
+  /* 列表工具条：应用数量 + 当前排序方式（无应用时隐藏） */
+  const lb = $('listbar');
+  if (lb) {
+    lb.classList.toggle('hidden', !apps.length);
+    const lc = $('lb-count');
+    if (lc) lc.textContent = apps.length ? ('共 ' + apps.length + ' 个应用') : '';
+    const mode = (s.settings && s.settings.sort) || 'added';
+    ['added', 'alpha'].forEach((m) => {
+      const b = $('sort-' + m);
+      if (b) b.classList.toggle('on', m === mode);
+    });
+  }
+
   if (!apps.length) {
     cards.textContent = '';
     const empty = document.createElement('div');
@@ -571,6 +583,7 @@ function render() {
     addAction.textContent = '+ 添加第一个应用';
     addAction.style.marginTop = '12px';
     addAction.addEventListener('click', openAddApp);
+    empty.classList.add('enter');
     b.appendChild(t); b.appendChild(p); b.appendChild(addAction); empty.appendChild(b);
     cards.appendChild(empty);
   } else {
@@ -594,11 +607,23 @@ function render() {
       if (n.__sig) (pool[n.__sig] = pool[n.__sig] || []).push(n);
     });
     const keep = [];
-    sortApps(apps).forEach((a) => {
+    /* 首屏（第一次拿到数据）：卡片加 .enter，按顺序错开 45ms 淡入 ——
+       只播这一次；之后轮询重建的卡片（进度变化会重建）绝不能带 .enter，
+       否则每秒重播一次入场动画，界面会持续"闪"。 */
+    const firstPaint = !cards.__painted;
+    cards.__painted = true;
+    sortApps(apps).forEach((a, i) => {
       const sig = sigOf(a);
       const bag = pool[sig];
       let node = (bag && bag.length) ? bag.shift() : null;
-      if (!node) { node = renderCard(a); node.__sig = sig; }
+      if (!node) {
+        node = renderCard(a);
+        node.__sig = sig;
+        if (firstPaint) {
+          node.classList.add('enter');
+          node.style.animationDelay = Math.min(i * 45, 320) + 'ms';
+        }
+      }
       keep.push(node);
     });
     keep.forEach((n, i) => {
@@ -836,21 +861,28 @@ async function doClean() {
   const items = r.items || [];
   const fgn = r.foreign_count || 0;
   const parts = r.parts_count || 0;
-  if (!items.length && !parts) {
+  const selfN = r.self_count || 0;
+  if (!items.length && !parts && !selfN) {
     toast('没有可清理的安装包' + (fgn ? '（另有 ' + fgn + ' 个不是本应用下载的，不会动）' : ''), '');
     await refresh();
     return;
   }
-  const lines = items.slice(0, 8).map((i) => '· ' + i.name + '（' + fmtSize(i.size) + '）');
-  const more = items.length > 8 ? ('\n… 以及另外 ' + (items.length - 8) + ' 个') : '';
-  const where = items[0].path.replace(/\/[^/]*$/, '');
+  const total = items.length + selfN;
+  const where = items.length
+    ? items[0].path.replace(/\/[^/]*$/, '')
+    : ('下载目录');
   const okClean = await askDialog({
-    title: items.length
-      ? ('清理 ' + items.length + ' 个安装包')
+    title: total
+      ? ('清理 ' + total + ' 个安装包')
       : ('清理 ' + parts + ' 个下载残留'),
     rows: [items.map((i) => [i.name, fmtSize(i.size)])
-      .concat((r.parts || []).slice(0, 8).map((n) => [n, '下载残留']))],
+      .concat((r.parts || []).slice(0, 8).map((n) => [n, '下载残留']))
+      .concat((r.parts || []).length > 8
+        ? [['… 另有 ' + ((r.parts || []).length - 8) + ' 个下载残留', '']] : [])],
     notes: [
+      // 本应用自己的安装器（旧版 fpk-update-x.y.z.fpk）单独说一句：它们也在清理范围里
+      (selfN ? ('其中 ' + selfN + ' 个是本应用自己的安装器（'
+        + (r.self || []).join('、') + '）—— 会一并清掉，需要时能从本应用 Release 重新下载。') : ''),
       (r.keep_count ? ('会保留 ' + r.keep_count + ' 个当前版本的包（回滚/修复用，'
         + fmtSize(r.keep_size) + '）。要连它们一起清，可在设置里关掉「清理时保留当前版本」。') : ''),
       '位置：' + where,
@@ -867,9 +899,10 @@ async function doClean() {
     const d = await api('/api/clean', { method: 'POST', body: {} });
     const n = (d.deleted || []).length;
     const np = (d.parts_deleted || []).length;
+    const ns = (d.self_deleted || []).length;
     const bad = (d.failed || []).length;
-    let msg = '已清理 ' + (n + np) + ' 项，释放 '
-      + fmtSize((d.freed || 0) + (d.parts_freed || 0));
+    let msg = '已清理 ' + (n + np + ns) + ' 项，释放 '
+      + fmtSize((d.freed || 0) + (d.parts_freed || 0) + (d.self_freed || 0));
     if (bad) msg += '；' + bad + ' 个没删掉（' + d.failed[0].reason + '）';
     if ((d.kept || []).length) msg += '；保留当前版本 ' + d.kept.length + ' 个';
     toast(msg, bad ? '' : 'ok');
@@ -1073,6 +1106,30 @@ const ENDPOINT = {
   update: '/api/update',
 };
 
+/* ── 弹窗开关（带入场/退场动效）──
+   为什么要统一入口：原来是 classList.remove/add('hidden') 直接切 —— 弹窗「啪」
+   地出现、瞬间消失，观感很突兀（用户反馈）。这里卸载时先加 .closing 播退场动画，
+   150ms 后再真正隐藏；重开同一弹窗时会取消未完成的关闭定时器，避免「刚打开又被
+   上一次的定时器关掉」。 */
+const _closeTimers = new WeakMap();
+function openModal(el) {
+  if (!el) return;
+  const tm = _closeTimers.get(el);
+  if (tm) { clearTimeout(tm); _closeTimers.delete(el); }
+  el.classList.remove('closing');
+  el.classList.remove('hidden');
+}
+function closeModal(el) {
+  if (!el || el.classList.contains('hidden') || el.classList.contains('closing')) return;
+  el.classList.add('closing');
+  const tm = setTimeout(() => {
+    el.classList.add('hidden');
+    el.classList.remove('closing');
+    _closeTimers.delete(el);
+  }, 150);
+  _closeTimers.set(el, tm);
+}
+
 /* 应用内确认弹窗 —— 替代浏览器原生 confirm。
    为什么自己做：原生弹窗是浏览器样式（方角、系统字体、不跟随应用深浅色），
    嵌在飞牛应用小窗里跟应用不是一套东西。
@@ -1202,7 +1259,7 @@ function askDialog(opt) {
     ok.classList.toggle('danger', !!o.danger);
     ok.classList.toggle('primary', !o.danger);
     $('cf-cancel').textContent = o.cancelText || '取消';
-    modal.classList.remove('hidden');
+    openModal(modal);
     if (ok.focus) ok.focus();
 
     /* 按字段自带的 rules 做校验：required / pattern / min/max。
@@ -1260,7 +1317,7 @@ function askDialog(opt) {
       }
     };
     function done(v) {
-      modal.classList.add('hidden');
+      closeModal(modal);
       ok.removeEventListener('click', onOk);
       $('cf-cancel').removeEventListener('click', onNo);
       modal.removeEventListener('click', onBg);
@@ -1461,8 +1518,8 @@ function stopPoll() {
 }
 
 /* ── 设置 ── */
-function openSettings() { $('settings-modal').classList.remove('hidden'); }
-function closeSettings() { $('settings-modal').classList.add('hidden'); }
+function openSettings() { openModal($('settings-modal')); }
+function closeSettings() { closeModal($('settings-modal')); }
 
 function openAddApp() {
   openSettings();
@@ -1490,6 +1547,26 @@ async function showLog() {
 /* ── 事件 ── */
 $('add-btn').addEventListener('click', openAddApp);
 $('check-btn').addEventListener('click', (ev) => doCheck(ev.currentTarget));
+/* 排序切换：先在本地生效（界面立刻重排），再写服务端设置；失败回滚并提示。 */
+function setSortMode(mode) {
+  if (!state) return;
+  const cur = (state.settings && state.settings.sort) || 'added';
+  if (mode === cur) return;
+  state.settings = state.settings || {};
+  state.settings.sort = mode;
+  render();
+  api('/api/settings', { method: 'POST', body: { sort: mode } }).then((r) => {
+    state.settings.sort = (r.settings && r.settings.sort) || mode;
+    render();
+    toast(mode === 'alpha' ? '已切换：按字母排序' : '已切换：按添加顺序', 'ok');
+  }).catch((e) => {
+    state.settings.sort = cur;
+    render();
+    toast('排序设置没保存成功：' + e.message, 'err');
+  });
+}
+$('sort-added').addEventListener('click', () => setSortMode('added'));
+$('sort-alpha').addEventListener('click', () => setSortMode('alpha'));
 $('settings-btn').addEventListener('click', openSettings);
 $('settings-close').addEventListener('click', closeSettings);
 $('settings-modal').addEventListener('click', (ev) => {
