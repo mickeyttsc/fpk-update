@@ -118,7 +118,12 @@ function renderTaskDrawer() {
     name.textContent = t.display || t.appname;
     const stage = document.createElement('span');
     stage.className = 'td-stage';
-    stage.textContent = actionLabel(t.action) + ' · ' + (t.status === 'ok' ? '完成' : (t.status === 'err' ? '失败' : (t.stage || '进行中')));
+    // 后端任务状态只有 queued / running / ok / failed 四种；原来这里判的是 'err'
+    // （永远为假），于是失败任务会显示 stage 文案而不是「失败」，看着像还在跑。
+    stage.textContent = actionLabel(t.action) + ' · ' + (
+      t.status === 'ok' ? '完成'
+        : (t.status === 'failed' ? '失败' : (t.stage || '进行中')));
+
     left.appendChild(name);
     left.appendChild(stage);
     const right = document.createElement('div');

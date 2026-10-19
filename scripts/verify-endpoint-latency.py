@@ -85,7 +85,7 @@ def main():
                                      "digest": "sha256:" + "a" * 64}]}
     m.gh_get = lambda url, retries=0: [REL]
     m.gh_releases = lambda repo, force=False: [REL]
-    m.resolve_source = lambda entry, force=False: {
+    m.resolve_source = lambda entry, force=False, want_arch=None: {
         "appname": "installed-one", "version": "1.2.4", "version_source": "manifest",
         "display_name": "Installed One", "platform": "all", "tag": "v1.2.4",
         "asset_name": "a.fpk", "asset_url": "http://x/a.fpk", "sha256": "a" * 64,
@@ -274,7 +274,7 @@ def main():
     # ── Scheme B：未安装的应用（添加放行 / 更新拒绝 / 下载放行 / 批量跳过）──
     print("▸ 未安装的应用（Scheme B）")
     _rs_stub = m.resolve_source
-    m.resolve_source = (lambda entry, force=False:
+    m.resolve_source = (lambda entry, force=False, want_arch=None:
                         dict(_rs_stub(entry, force=force),
                              appname="not-yet-app", display_name="NotYet"))
     try:

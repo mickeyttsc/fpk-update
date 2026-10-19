@@ -2048,6 +2048,16 @@ def reconcile_state(st):
             lat = a.get("latest")
             if cur and lat:
                 a["update_available"] = bool(is_newer(lat, cur))
+                # relation 必须一起重算：外部（应用中心 / 手工安装）升级后如果只改
+                # update_available 不改 relation，界面会按旧快照显示
+                # 「有新版 · 不能自动更新」，而其实已经是最新 —— 实测误导。
+                _c = cmp_version(lat, cur)
+                if _c == 1:
+                    a["relation"] = "newer"
+                elif _c == 0:
+                    a["relation"] = "same"
+                elif _c == -1:
+                    a["relation"] = "older"
             else:
                 a["update_available"] = False
             # 校验已下载文件是否真实存在于磁盘
@@ -2581,6 +2591,20 @@ def _download_package(app, rel, tid):
     return fpk_path, res["size"], res["sha256"], mf
 
 
+def _resolve_app_source(app, force=False):
+    """按应用解析来源 —— 统一带上「已装那个包的架构」锚点。
+
+    为什么必须统一：check_one 用已装 platform 当架构锚点挑包，而动作路径（下载/安装/
+    更新）原来直接 resolve_source(app) 不带锚点 —— 两边可能挑到**不同的附件**，
+    表现为「检测说要用 A 包，更新却去找 B 包，然后报下载目录里没有 B」。
+    """
+    try:
+        arch = installed_platform(app.get("appname") or "") or None
+    except Exception:                      # noqa: BLE001
+        arch = None
+    return resolve_source(app, force=force, want_arch=arch)
+
+
 def do_download(tid, appname):
     """【只下载】：下到本地并校验 sha256，不改动任何应用。"""
     app = _resolve_app(appname)
@@ -2588,7 +2612,7 @@ def do_download(tid, appname):
         raise RuntimeError("该应用不在列表里")
     try:
         update_task(tid, stage="checking", message="正在确认最新版本…")
-        rel = resolve_source(app)
+        rel = _resolve_app_source(app)
         cur = installed_version(appname)
         if cur and norm_version(cur) == norm_version(rel["version"]):
             update_task(tid, status="ok", stage="done", percent=100,
@@ -2618,7 +2642,7 @@ def do_install(tid, appname):
         return _do_first_install(tid, appname)
     try:
         update_task(tid, stage="checking", message="正在核对本地安装包…")
-        rel = resolve_source(app)
+        rel = _resolve_app_source(app)
         # 没有摘要就**不许安装** —— 与「下载」保持一致。原来这里用
         # `if rel.get("sha256") and ...` 短路，等于「来源没有摘要时完全不校验」，
         # 而下载目录往往就是用户的归档目录、里面可能有同名文件 →
@@ -2763,7 +2787,7 @@ def _do_first_install(tid, appname):
     fpk_path = None
     try:
         update_task(tid, stage="checking", message="正在确认最新版本…")
-        rel = resolve_source(app)
+        rel = _resolve_app_source(app)
         if not rel.get("sha256"):
             raise RuntimeError("这个来源没有 sha256 摘要，出于安全不会安装"
                                "（可改用仓库来源，GitHub 的 Release 附件一般带 digest）")
@@ -2911,12 +2935,29 @@ def do_update(tid, appname):
     fpk_path = None
     try:
         update_task(tid, stage="checking", message="正在确认最新版本…")
-        rel = resolve_source(app)
+        rel = _resolve_app_source(app)
         cur = installed_version(appname)
-        if not is_newer(rel["version"], cur):
+        target = rel["version"]
+        # ⚠️ 这里不能用 is_newer 一刀切：用户「锁定旧版」就是为了回滚，降级安装必须放行。
+        # 原来的写法（只认 is_newer）导致回滚点「安装」后任务直接报「已是最新版本」，
+        # 而卡片上明明写着 2.9.2 → 2.9.1，等于这个功能完全用不了。
+        _cmp = cmp_version(target, cur or "")
+        pinned = bool(app.get("tag"))
+        if _cmp == 0:
             update_task(tid, status="ok", stage="done", percent=100,
                         message="已是最新版本（%s）" % cur, version=cur,
                         finished_at=now_iso())
+            return
+        if _cmp is None and not is_newer(target, cur):
+            update_task(tid, status="ok", stage="done", percent=100,
+                        message="已是最新版本（%s）" % cur, version=cur,
+                        finished_at=now_iso())
+            return
+        if _cmp == -1 and not pinned:
+            # 目标比已装的旧、又没锁定版本 → 不擅自降级（可能是仓库回滚了 Release）
+            update_task(tid, status="ok", stage="done", percent=100,
+                        message="当前已装 %s，比目标 %s 更新，未做改动" % (cur, target),
+                        version=cur, finished_at=now_iso())
             return
         # 本地已有「就是这一版、且校验过」的包 → 直接用它，不重复下载。
         mf = None
@@ -3900,7 +3941,7 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             if not rel:
                 try:
-                    rel = resolve_source(app)
+                    rel = _resolve_app_source(app)
                 except Exception as exc:  # noqa: BLE001
                     return self._err(400, "无法解析最新版本：%s" % exc)
             spec = wizard_spec_for(app, rel)
