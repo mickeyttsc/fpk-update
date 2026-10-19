@@ -1,5 +1,5 @@
 appname               = fpk-update
-version               = 1.4.4
+version               = 1.4.6
 display_name          = FPK更新
 desc                  = 一个 GitHub 上 fpk 的下载更新器：填个仓库地址，它自己识别版本、后台下载、校验 sha256，你点一下就能装上。已装的应用就地升级；没装的也能在这里直接完整安装（可选存储空间，装好自动启动）。下载可以自动，安装永远由你点。
 maintainer            = Mickey
@@ -12,5 +12,5 @@ ctl_stop              = true
 service_port          = 18600
 desktop_uidir         = ui
 desktop_applaunchname = fpk-update.main
-changelog             = 1.4.4：全量功能体检后修 4 个真 bug——①「锁定旧版」回滚被拦成「已是最新」，回滚功能完全用不了；②应用在别处升级后卡片仍显示「有新版·不能自动更新」（relation 没跟着重算）；③下载/安装/更新路径挑包时不带已装架构锚点，可能与检测结果不一致；④任务失败时任务列表显示成「进行中」。
+changelog             = 1.4.6：顶部状态条加实时进度条——检查更新按 完成数/总数 填真实进度，下载/安装按后端百分比填（带 0.45s 平滑过渡与 aria-valuenow）；后端还没报百分比时显示不确定态滑动条，不再只是一句文字。手机端条高 3px。
 checksum              =

@@ -135,17 +135,118 @@ function renderTaskDrawer() {
   });
 }
 
-function showNotice(msg, kind = 'info') {
+/* 提示条：图标 + 正文 + 可选「详情 ›」+ 可选进度条。
+   状态各有观感（见 style.css）：
+     info  蓝  —— 一般说明（如未设令牌）
+     busy  紫  —— 正在跑（检查/下载/安装），图标转圈
+     warn  琥珀 —— 需要你留意，但仍能继续
+     error 红  —— 出错了
+   opts: { more: true }          → 点击展开任务抽屉，右侧显示「详情 ›」
+         { onClick: fn }          → 点击执行自定义动作（如打开设置）
+         { pct: 45 }              → 底部画进度条（真实百分比）
+         { pct: null }            → 底部画「不确定态」滑动条（后端还没报百分比）
+         都不给                    → 不画进度条 */
+const NOTICE_ICONS = {
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11.2v5.1"/><circle cx="12" cy="7.7" r="1" fill="currentColor" stroke="none"/>',
+  busy: '<path d="M20.5 12a8.5 8.5 0 1 1-2.5-6M20.5 4.2v5h-5"/>',
+  warn: '<path d="M12 4.4 3.1 19.6h17.8L12 4.4z"/><path d="M12 10.1v4.3"/><circle cx="12" cy="17.3" r="1" fill="currentColor" stroke="none"/>',
+  error: '<circle cx="12" cy="12" r="9"/><path d="M9.2 9.2l5.6 5.6M14.8 9.2l-5.6 5.6"/>',
+};
+
+/* 进度条宽度单独更新（不重建 DOM）：轮询每几秒来一次，重建会让填充条从头闪回。
+   不查 CSS 选择器 —— 直接记着刚建出来的那个节点（渲染自测的 DOM 桩没有 element.querySelector）。 */
+function setNoticeProgress(el, pct) {
+  const bar = el._ntProg;
+  if (!bar) return;
+  const fill = (bar.children && bar.children[0]) || null;
+  if (!fill) return;
+  const det = (typeof pct === 'number') && isFinite(pct);
+  bar.classList.toggle('indet', !det);
+  let label = '';
+  if (det) {
+    const v = Math.max(0, Math.min(100, pct));
+    fill.style.width = v.toFixed(1) + '%';
+    bar.setAttribute('aria-valuenow', String(Math.round(v)));
+    label = Math.round(v) + '%';
+  } else {
+    fill.style.width = '';
+    bar.removeAttribute('aria-valuenow');
+  }
+  if (el._ntPct) el._ntPct.textContent = label;
+}
+
+function showNotice(msg, kind = 'info', opts) {
   const el = $('notice');
   if (!msg) {
     el.classList.add('hidden');
+    el.onclick = null;
+    el.dataset.sig = '';
     if ($('task-drawer')) $('task-drawer').classList.add('hidden');
     taskDrawerOpen = false;
     return;
   }
-  el.textContent = msg;
-  el.className = 'notice ' + kind;
-  el.onclick = toggleTaskDrawer;
+  const o = opts || {};
+  const k = NOTICE_ICONS[kind] ? kind : 'info';
+  const hasBar = o.pct !== undefined;
+
+  // 内容没变就不重建 DOM —— 轮询每几秒跑一次，重建会让动画回跳。
+  const sig = [k, msg, o.more ? '1' : '0', hasBar ? '1' : '0'].join('\u0000');
+  if (el.dataset.sig !== sig) {
+    el.dataset.sig = sig;
+    el.textContent = '';
+    el._ntProg = null;
+    el._ntPct = null;
+    const ico = document.createElement('span');
+    ico.className = 'nt-ico';
+    ico.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
+      + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + NOTICE_ICONS[k] + '</svg>';
+    const txt = document.createElement('span');
+    txt.className = 'nt-text';
+    txt.textContent = msg;                       // 纯文本写入，应用名里的尖括号不会被当标签
+    el.appendChild(ico);
+    el.appendChild(txt);
+    // 百分比单独放一个小标签（原地更新）：绝不能拼进正文 ——
+    // 正文一变 sig 就变 → 整条重建 → 进度条的过渡和图标转圈每 1.5s 被重置（实测症状：条在跳、圈在抖）。
+    if (hasBar) {
+      const pctEl = document.createElement('span');
+      pctEl.className = 'nt-pct';
+      el.appendChild(pctEl);
+      el._ntPct = pctEl;
+    }
+    if (o.more) {
+      const more = document.createElement('span');
+      more.className = 'nt-more';
+      more.innerHTML = '详情<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+        + ' stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        + '<path d="M9.5 6l6 6-6 6"/></svg>';
+      el.appendChild(more);
+    }
+    if (hasBar) {
+      const bar = document.createElement('div');
+      bar.className = 'nt-prog';
+      bar.setAttribute('role', 'progressbar');
+      bar.setAttribute('aria-valuemin', '0');
+      bar.setAttribute('aria-valuemax', '100');
+      const fill = document.createElement('i');
+      bar.appendChild(fill);
+      el.appendChild(bar);
+      el._ntProg = bar;
+    }
+  }
+
+  el.className = 'notice ' + k + ((o.more || o.onClick) ? '' : ' no-act');
+  el.setAttribute('role', o.more ? 'button' : 'status');
+  el.onclick = o.more ? toggleTaskDrawer : (o.onClick || null);
+  // 可点的状态条要能用键盘触发（div 不会像 button 那样回车即点）
+  el.tabIndex = el.onclick ? 0 : -1;
+  el.onkeydown = el.onclick ? (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar') {
+      if (ev.preventDefault) ev.preventDefault();
+      el.onclick();
+    }
+  } : null;
+  el.title = o.more ? '点击查看任务队列详情' : '';
+  if (hasBar) setNoticeProgress(el, o.pct);
   if (taskDrawerOpen) renderTaskDrawer();
 }
 
@@ -841,15 +942,26 @@ function render() {
   if (live.length) {
     const cur = live.find((t) => t.status === 'running') || live[0];
     const extra = live.length > 1 ? ('（队列还有 ' + (live.length - 1) + ' 个）') : '';
+    const pct = (cur.percent !== null && cur.percent !== undefined) ? Number(cur.percent) : null;
     showNotice('后台任务：' + (cur.display || cur.appname) + ' · '
-      + actionLabel(cur.action) + ' · ' + (cur.message || '处理中…') + ' ' + extra
-      + '　—— 可以关掉本页面，任务会在后台继续。', 'info');
+      + actionLabel(cur.action) + ' · '
+      + (cur.message || '处理中…') + ' ' + extra
+      + '　—— 可以关掉本页面，任务会在后台继续。', 'busy', {
+      more: true,
+      pct: (pct !== null && isFinite(pct)) ? pct : null,   // 百分比只进进度条，不进正文
+    });
   } else if (s.checking && s.checking.running) {
-    showNotice('正在检查更新：' + (s.checking.done || 0) + '/' + (s.checking.total || 0)
-      + '（各应用并行查，查完一个卡片就更新一个，不用等整轮）', 'info');
+    const total = s.checking.total || 0;
+    const done = s.checking.done || 0;
+    showNotice('正在检查更新：' + done + '/' + total
+      + '（各应用并行查，查完一个卡片就更新一个，不用等整轮）', 'busy', {
+      pct: total > 0 ? (done / total) * 100 : null,
+    });
   } else if (!s.has_token) {
     showNotice('还没设置 GitHub 访问令牌：匿名额度只有 60 次/小时且按出口 IP 共享，'
-      + '「检查更新」容易被限流。点右上角「设置」填一个令牌就稳了。', 'info');
+      + '「检查更新」容易被限流。点这里填一个令牌就稳了。', 'warn', {
+      onClick: () => { openSettings(); switchTab('misc'); },
+    });
   } else {
     showNotice('');
   }

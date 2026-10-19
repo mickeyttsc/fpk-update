@@ -46,6 +46,7 @@ function makeEl(tag) {
     },
     setAttribute(k, v) { this._attrs[k] = String(v); },
     getAttribute(k) { return this._attrs[k] === undefined ? null : this._attrs[k]; },
+    removeAttribute(k) { delete this._attrs[k]; },
   };
   // textContent 要建模成「赋值即清空子节点」（真实 DOM 行为）。
   // 不建模的话，「清空列表」这类操作在桩里会留下残影，测出来的结论是错的（实测踩过）。
@@ -129,7 +130,8 @@ const src = fs.readFileSync(path, 'utf8')
   + '\n;globalThis.__getTheme = () => themePref;'
   + '\n;globalThis.__render = render;'
   + '\n;globalThis.__els = (id) => document.getElementById(id);'
-  + '\n;globalThis.__askDialog = askDialog;';
+  + '\n;globalThis.__askDialog = askDialog;'
+  + '\n;globalThis.__showNotice = showNotice;';
 
 vm.createContext(sandbox);
 vm.runInContext(src, sandbox, { filename: path });
@@ -395,6 +397,18 @@ try {
     && ckBtn.classList.contains('loading') && ckBtn.disabled === true;
   console.log(`  ${okCk ? '✔' : '✘'} 检查中顶栏显示进度 x/y 且按钮转圈  -> "${ckText}"`);
   if (!okCk) bad++;
+
+  // 提示条：检查中要画进度条（2/6 → 33.3%），且条与数字同源
+  {
+    const N = sandbox.__els('notice');
+    const bar = (N.children || []).find((c) => String(c.className).includes('nt-prog'));
+    const fill = bar && bar.children[0];
+    const w = fill && fill.style ? fill.style.width : null;
+    const lbl = N._ntPct ? N._ntPct.textContent : null;
+    const okBar = !!bar && w === '33.3%' && lbl === '33%' && !bar.classList.contains('indet');
+    console.log(`  ${okBar ? '✔' : '✘'} 检查中提示条有进度条（2/6 → 33%）  -> width=${w} label=${lbl}`);
+    if (!okBar) bad++;
+  }
 
   sandbox.__setState({
     apps: [], tasks: [], last_check: '2026-10-16T18:00:00+08:00', has_token: true,
@@ -919,6 +933,70 @@ try {
     if (!ok5vals) bad++;
   } catch (e) {
     console.log('  ✘ 抛异常 -> ' + e.message);
+    bad++;
+  }
+  console.log('────────────────────────────────────────');
+  console.log('▸ 顶部状态条（进度条）');
+  try {
+    const N = sandbox.__els('notice');
+    const findBar = () => (N.children || []).find((c) => String(c.className).includes('nt-prog'));
+    const cls = () => String(N.className || '');
+
+    // ① 有真实百分比 → 实心进度 + aria-valuenow
+    sandbox.__showNotice('正在检查更新：3/7', 'busy', { pct: (3 / 7) * 100 });
+    let bar = findBar();
+    const w1 = bar && bar.children[0] && bar.children[0].style.width;
+    const a1 = bar && bar.getAttribute('aria-valuenow');
+    const det = !!bar && !bar.classList.contains('indet') && w1 === '42.9%' && a1 === '43';
+    console.log(`  ${det ? '✔' : '✘'} 有百分比 → 填充宽度与 aria 数值正确  -> ${w1} / ${a1}`);
+    if (!det) bad++;
+
+    // ② 后端还没报百分比 → 不确定态（滑动段），且不留 aria 数值
+    sandbox.__showNotice('后台任务：X · 下载中 · 处理中…', 'busy', { pct: null, more: true });
+    bar = findBar();
+    const indet = !!bar && bar.classList.contains('indet') && !bar.getAttribute('aria-valuenow');
+    console.log(`  ${indet ? '✔' : '✘'} 没有百分比 → 不确定态滑动条`);
+    if (!indet) bad++;
+
+    // ③ 同一内容轮询两次不重建 DOM（动画不跳、节点复用），只更新宽度
+    const barNode = findBar();
+    const before = (N.children || []).length;
+    sandbox.__showNotice('后台任务：X · 下载中 · 处理中…', 'busy', { pct: 55, more: true });
+    const w2 = barNode.children[0].style.width;
+    const reused = findBar() === barNode && (N.children || []).length === before && w2 === '55.0%';
+    console.log(`  ${reused ? '✔' : '✘'} 同一内容只更新宽度、不重建节点  -> ${w2}`);
+    if (!reused) bad++;
+
+    // ④ 不需要进度时（未设令牌）不画进度条，但整条仍可点去设置
+    sandbox.__showNotice('还没设置令牌', 'warn', { onClick: () => {} });
+    const noBar = !findBar() && cls().includes('warn') && typeof N.onclick === 'function';
+    console.log(`  ${noBar ? '✔' : '✘'} warn 状态不画进度条，但仍可点击跳设置`);
+    if (!noBar) bad++;
+
+    // ⑤ 百分比只在独立小标签里、绝不拼进正文（拼进去 → 每次都重建，过渡与转圈被反复重置）
+    sandbox.__showNotice('后台任务：X · 后台下载中', 'busy', { pct: 42, more: true });
+    const tEl = (N.children || []).find((c) => String(c.className).includes('nt-text'));
+    const lbl = N._ntPct ? N._ntPct.textContent : null;
+    const noPctInText = tEl && !String(tEl.textContent).includes('%') && lbl === '42%';
+    console.log(`  ${noPctInText ? '✔' : '✘'} 正文不含百分比、标签单独显示  -> text="${tEl ? tEl.textContent : ''}" label=${lbl}`);
+    if (!noPctInText) bad++;
+
+    // ⑥ 可点的状态条能用键盘触发（div 不会像 button 那样回车即点）
+    let opened = 0;
+    sandbox.__showNotice('提示', 'warn', { onClick: () => { opened++; } });
+    const kb = typeof N.onkeydown === 'function';
+    if (kb) N.onkeydown({ key: 'Enter', preventDefault() {} });
+    const okKb = kb && opened === 1 && N.tabIndex === 0;
+    console.log(`  ${okKb ? '✔' : '✘'} 可点状态条支持键盘 Enter 触发（tabIndex=0）  -> opened=${opened}`);
+    if (!okKb) bad++;
+
+    // ⑦ 没有内容 → 整条隐藏（不留空壳）
+    sandbox.__showNotice('');
+    const hid = N.classList.contains('hidden');
+    console.log(`  ${hid ? '✔' : '✘'} 没有内容时整条隐藏`);
+    if (!hid) bad++;
+  } catch (e) {
+    console.log('  ✘ 状态条渲染抛异常 -> ' + e.message);
     bad++;
   }
   console.log('────────────────────────────────────────');

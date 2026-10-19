@@ -133,16 +133,81 @@ code {
 .brand-text .muted { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .topbar-actions { display: flex; gap: 8px; flex: none; }
 
-/* ── 提示条 ── */
+/* ── 状态提示条 ──
+   以前 info 直接借 --warn 的底/字（整条铺浅黄 #fef3c7），页面一进来先顶一块土黄，
+   和卡片的中性底完全不搭。现在改成**中性卡片 + 状态色点缀**：
+   只有圆形图标章、1px 描边和 6% 的同色薄底跟着状态变色，正文仍是正常前景色。
+   --nt 在每条 kind 上覆盖，派生色一律在使用处 color-mix（切主题自动跟随）。 */
 .notice {
-  max-width: 1240px; margin: 16px auto 0; padding: 11px 15px;
-  border-radius: 12px; font-size: 13.5px; line-height: 1.6;
-  border: 1px solid transparent;
+  --nt: var(--accent);
+  max-width: 1240px; margin: 16px auto 0;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 9px 11px;
+  padding: 10px 13px 10px 11px;
+  border-radius: 14px; font-size: 13.5px; line-height: 1.55;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--nt) 6%, var(--bg-soft));
+  border: 1px solid color-mix(in srgb, var(--nt) 20%, var(--line));
+  box-shadow: var(--shadow);
   margin-left: 16px; margin-right: 16px;
   cursor: pointer; user-select: none;
-  transition: opacity .15s, transform .08s;
+  transition: background .16s, border-color .16s, transform .08s;
 }
+.notice:hover { background: color-mix(in srgb, var(--nt) 9%, var(--bg-soft)); }
 .notice:active { transform: scale(.995); }
+.notice.no-act { cursor: default; }
+.notice.no-act:hover { background: color-mix(in srgb, var(--nt) 6%, var(--bg-soft)); }
+
+.nt-ico {
+  flex: none; width: 27px; height: 27px; border-radius: 9px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--nt); background: color-mix(in srgb, var(--nt) 15%, transparent);
+}
+.nt-ico svg { width: 15px; height: 15px; display: block; }
+.nt-text { flex: 1 1 auto; min-width: 0; }
+.nt-pct {
+  flex: none; font-size: 12px; font-weight: 600; color: var(--nt);
+  font-variant-numeric: tabular-nums;   /* 数字等宽，避免百分比跳动时正文位置左右抖 */
+  min-width: 3.2em; text-align: right;
+}
+.nt-pct:empty { display: none; }
+.nt-more {
+  flex: none; display: inline-flex; align-items: center; gap: 1px;
+  font-size: 12px; font-weight: 500; color: var(--nt); white-space: nowrap;
+}
+.nt-more svg { width: 13px; height: 13px; }
+
+.notice.info  { --nt: var(--accent); }
+.notice.busy  { --nt: var(--accent-2); }
+.notice.warn  { --nt: var(--warn); }
+.notice.error { --nt: var(--err); }
+
+/* 进行中：图标轻轻转圈，实时进度交给下面的进度条 */
+.notice.busy .nt-ico svg { animation: nt-spin 1.15s linear infinite; }
+@keyframes nt-spin { to { transform: rotate(360deg); } }
+
+/* 进度条：4px 细条，整行独占（flex 1 0 100%）；有真实百分比就走宽度过渡，
+   没拿到百分比时走「滑动段」表示还在进行中（不确定态）。 */
+.nt-prog {
+  flex: 1 0 100%; height: 4px; border-radius: 999px;
+  background: color-mix(in srgb, var(--nt) 15%, var(--line-soft));
+  overflow: hidden;
+}
+.nt-prog > i {
+  display: block; height: 100%; width: 0; border-radius: inherit;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--nt) 62%, var(--bg-soft)), var(--nt));
+  transition: width .45s cubic-bezier(.22, .61, .36, 1);
+}
+.nt-prog.indet > i { width: 34% !important; animation: nt-slide 1.5s ease-in-out infinite; }
+@keyframes nt-slide {
+  from { margin-left: -34%; }
+  to   { margin-left: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .notice.busy .nt-ico svg { animation: none; }
+  .nt-prog.indet > i { animation: none; width: 100% !important; opacity: .45; }
+  .nt-prog > i { transition: none; }
+}
 .task-drawer {
   max-width: 1240px; margin: 8px auto 0; padding: 12px 16px;
   border-radius: 12px; background: var(--bg-soft); border: 1px solid var(--line);
@@ -161,8 +226,8 @@ code {
 .mirror-ping-results { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 10px; font-size: 12px; }
 .mp-item { display: flex; justify-content: space-between; padding: 4px 8px; border-radius: 6px; background: var(--line-soft); }
 .mp-item.fast { color: var(--ok); font-weight: bold; }
-.notice.info { background: var(--warn-bg); color: var(--warn); }
-.notice.error { background: var(--err-bg); color: var(--err); }
+.notice.info { --nt: var(--accent); }
+.notice.error { --nt: var(--err); }
 
 /* ── 本应用自身（单独一块） ── */
 .selfbar {
@@ -430,14 +495,27 @@ code {
 }
 .c-state > span:nth-child(2) { flex: 1; word-break: break-word; }
 .c-state-ico { flex: none; font-weight: 700; }
-.c-state.ok { background: var(--ok-bg); color: var(--ok); }
-.c-state.warn { background: var(--warn-bg); color: var(--warn); }
-.c-state.bad { background: var(--err-bg); color: var(--err); }
+/* 状态块：统一用「9% 同色薄底 + 1px 内描边」，比原来的实心淡色块更贴卡片语言。
+   内描边用 inset 阴影，不占布局（不会因为加边把文字挤动）。 */
+.c-state.ok {
+  background: color-mix(in srgb, var(--ok) 9%, var(--bg-soft)); color: var(--ok);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ok) 18%, transparent);
+}
+.c-state.warn {
+  background: color-mix(in srgb, var(--warn) 9%, var(--bg-soft)); color: var(--warn);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 22%, transparent);
+}
+.c-state.bad {
+  background: color-mix(in srgb, var(--err) 9%, var(--bg-soft)); color: var(--err);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--err) 20%, transparent);
+}
 .c-state.muted { background: var(--line-soft); color: var(--fg-muted); }
 
 .c-err {
   font-size: 12.5px; line-height: 1.6; color: var(--err);
-  background: var(--err-bg); padding: 7px 10px; border-radius: 9px;
+  background: color-mix(in srgb, var(--err) 9%, var(--bg-soft));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--err) 20%, transparent);
+  padding: 7px 10px; border-radius: 9px;
 }
 
 /* 按钮行：等宽一行 */
@@ -448,10 +526,22 @@ code {
   font-size: 11.5px; padding: 3px 9px; border-radius: 999px;
   font-weight: 500; white-space: nowrap; flex: none;
 }
-.badge.ok { background: var(--ok-bg); color: var(--ok); }
-.badge.new { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
-.badge.warn { background: var(--warn-bg); color: var(--warn); }
-.badge.err { background: var(--err-bg); color: var(--err); }
+.badge.ok {
+  background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ok) 24%, transparent);
+}
+.badge.new {
+  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 26%, transparent);
+}
+.badge.warn {
+  background: color-mix(in srgb, var(--warn) 12%, transparent); color: var(--warn);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 26%, transparent);
+}
+.badge.err {
+  background: color-mix(in srgb, var(--err) 12%, transparent); color: var(--err);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--err) 24%, transparent);
+}
 .badge.wait { background: var(--line-soft); color: var(--fg-muted); }
 
 .dismiss {
@@ -708,8 +798,13 @@ code {
   .listbar { margin: 10px 13px 0; padding: 0; }
   .lb-btn { padding: 5px 9px; font-size: 12px; }
 
-  /* 提示条与卡片边距严格对齐（13px） */
-  .notice { margin: 10px 13px 0; padding: 10px 13px; font-size: 13px; border-radius: 12px; }
+  /* 提示条与卡片边距严格对齐（13px）；手机端收紧图标与内边距，正文允许两行 */
+  .notice { margin: 10px 13px 0; padding: 9px 12px 9px 10px; font-size: 12.8px; border-radius: 12px; gap: 9px; }
+  .notice .nt-ico { width: 24px; height: 24px; border-radius: 8px; }
+  .notice .nt-ico svg { width: 13.5px; height: 13.5px; }
+  .notice .nt-more { font-size: 11.5px; }
+  .notice .nt-pct { font-size: 11.5px; min-width: 0; }
+  .notice .nt-prog { height: 3px; }
 
   /* 本应用自身区块（模块2）：移动端精简去重，消除与顶栏完全重复的标题/版本号/刷新按钮 */
   .selfbar {
