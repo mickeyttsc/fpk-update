@@ -1142,6 +1142,7 @@ def find_release(repo, allow_prerelease=False, want_tag="", force=False):
             "仓库 %s 这次读不到任何 Release —— 多半是 GitHub 侧瞬时抖动。"
             "点一次「检查更新」重试即可。" % repo)
     skipped_draft = skipped_pre = 0
+    cands = []
     for rel in data:
         if rel.get("draft"):
             skipped_draft += 1
@@ -1161,13 +1162,9 @@ def find_release(repo, allow_prerelease=False, want_tag="", force=False):
                   if str(a.get("name") or "").lower().endswith(".fpk")]
         if not assets:
             continue
-        return {
-            "tag": tag,
-            "prerelease": bool(rel.get("prerelease")),
-            "published_at": rel.get("published_at"),
-            "notes": (rel.get("body") or "").strip()[:400],
-            "assets": assets,
-        }
+        cands.append((rel, tag, assets))
+    if cands:
+        return _pick_newest_release(cands)
     if want_tag:
         raise RuntimeError("仓库 %s 里没有 tag 为 %s 的 Release（或者它的附件还不叫 .fpk）"
                            % (repo, want_tag))
@@ -1175,6 +1172,43 @@ def find_release(repo, allow_prerelease=False, want_tag="", force=False):
         "仓库 %s 的 %d 个 Release 里没有可用的 .fpk 附件（draft %d 个、预发布/滚动 tag %d 个已跳过）。"
         "如果是刚发布的版本，等附件上传完再点一次「检查更新」。"
         % (repo, len(data), skipped_draft, skipped_pre))
+
+
+def _pick_newest_release(cands):
+    """从候选里挑「最新」的那个 —— **绝不依赖 GitHub 返回的顺序**。
+
+    为什么必须自己排：`/releases` 的排序键是 created_at，而实测多个 Release 的
+    created_at 会**完全相同**（wild-work-fpk 的 v2.9.2 与 v2.9.1 都是
+    2026-10-18T10:14:56Z，v2.9.0 与 v2.8.0 也并列）。并列时 GitHub 给的先后
+    不保证稳定，而旧实现是「取列表第一条」—— 于是出现「已装 2.9.1、上游已发
+    2.9.2，点检测却说已是最新」，钉住 tag 之后才突然正常（实测复现两次）。
+    这属于「版本判断依赖外部顺序」的缺陷，换个仓库换个时刻就会再犯。
+
+    排序口径（可预测、可复现）：
+      ① 候选的 tag 全都能解析成版本号 → 按版本号从大到小（与「已装版本」同一口径）；
+      ② 否则按 published_at 从大到小，再用 release id 兜底（id 单调递增）。
+    """
+    if all(_version_from_tag(t) for _, t, _ in cands):
+        def _key_by_version(item):
+            _rel, tag, _assets = item
+            sv = split_version(_version_from_tag(tag))
+            nums, it = sv if sv else ((0,), 0)
+            n = max(len(nums), 4)
+            return (nums + (0,) * (n - len(nums)), it)
+        rel, tag, assets = max(cands, key=_key_by_version)
+    else:
+        def _key_by_time(item):
+            _rel, _tag, _assets = item
+            return (str(_rel.get("published_at") or ""), int(_rel.get("id") or 0))
+        rel, tag, assets = max(cands, key=_key_by_time)
+    return {
+        "tag": tag,
+        "prerelease": bool(rel.get("prerelease")),
+        "published_at": rel.get("published_at"),
+        "notes": (rel.get("body") or "").strip()[:400],
+        "assets": assets,
+    }
+
 
 
 def list_options(source, max_releases=20):
