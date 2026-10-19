@@ -630,6 +630,13 @@ code {
   border-radius: 12px; background: var(--bg);
   animation: m-card-in .2s cubic-bezier(.16, 1, .3, 1) both;
 }
+/* 「更新方式」分段：与 .selwrap 同一行的视觉节奏，但它是二选一按钮组而不是下拉 */
+.picker-mode { align-items: center; }
+.picker-mode > .pick-lbl {
+  color: var(--fg-muted); font-size: 13px; flex: none; min-width: 52px;
+}
+.picker-mode > .seg { flex: 1; margin-top: 0; }
+.picker .set-hint { margin-top: 6px; }
 .selwrap { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; }
 .selwrap > span { color: var(--fg-muted); font-size: 13px; flex: none; min-width: 52px; }
 .selwrap > select,

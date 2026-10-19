@@ -1,5 +1,5 @@
 appname               = fpk-update
-version               = 1.4.0
+version               = 1.4.1
 display_name          = FPK更新
 desc                  = 一个 GitHub 上 fpk 的下载更新器：填个仓库地址，它自己识别版本、后台下载、校验 sha256，你点一下就能装上。已装的应用就地升级；没装的也能在这里直接完整安装（可选存储空间，装好自动启动）。下载可以自动，安装永远由你点。
 maintainer            = Mickey
@@ -12,5 +12,5 @@ ctl_stop              = true
 service_port          = 18600
 desktop_uidir         = ui
 desktop_applaunchname = fpk-update.main
-changelog             = 1.4.0：①新增 Webhook 新版本消息提醒（支持 Bark、Gotify、Server酱、企微/钉钉/飞书群机器人及测试推送）；②新增下载加速镜像并发一键测速与快捷选用；③顶栏新增可折叠任务队列抽屉面板；④网络异常智能分类诊断（区分 DNS 解析失败、连接超时、限流与断网）；⑤卡片视觉轻量微投影与无感分层，全栈零额外开销。
+changelog             = 1.4.1：①修复「上游已发新版、点检测却一直说已是最新」——选版本不再取 Release 列表第一条，改为自行按版本号排序（GitHub 多个 Release 的 created_at 会完全相同，列表先后不可靠，实测把 v2.9.2 判成 v2.9.1）；②「更新方式」独立成显式选项：跟随最新（默认）/ 锁定版本，添加应用不再顺手把当前版本钉死，锁定状态在卡片上有明确标记与一键解除。
 checksum              =

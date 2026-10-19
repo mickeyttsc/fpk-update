@@ -180,7 +180,9 @@
 
         <h4>添加应用仓库</h4>
         <p class="set-hint">
-          输入 GitHub 仓库名（如 <code>owner/name</code> 或完整链接），点击获取版本后即可添加进管理列表。
+          输入 GitHub 仓库名（如 <code>owner/name</code> 或完整链接），点「获取版本」后选
+          <b>更新方式</b>再加进列表：<b>跟随最新</b>（默认，自动跟上游正式版）或
+          <b>锁定版本</b>（固定用某个 Release，用于回滚或避开有问题的版本）。
         </p>
         <div class="row">
           <input type="text" id="app-add-input" placeholder="owner/name 或 https://github.com/owner/name"
@@ -189,13 +191,21 @@
         </div>
 
         <div class="picker hidden" id="app-picker">
-          <div class="row">
+          <div class="row picker-mode">
+            <span class="pick-lbl">更新方式</span>
+            <div class="seg" id="mode-seg" role="tablist">
+              <button type="button" data-mode="latest" class="on">跟随最新</button>
+              <button type="button" data-mode="pin">锁定版本</button>
+            </div>
+          </div>
+          <p class="set-hint" id="mode-hint"></p>
+          <div class="row" id="ver-row">
             <label class="selwrap">
               <span>版本</span>
               <select id="ver-select"></select>
             </label>
           </div>
-          <div class="row">
+          <div class="row" id="asset-row">
             <label class="selwrap">
               <span>安装包</span>
               <select id="asset-select"></select>

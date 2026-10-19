@@ -8,8 +8,14 @@ let pollTimer = null;
 /* 内置默认图标（应用没有自带图标 / 图标读不到时用） */
 const DEFAULT_ICON = '/default-icon.svg';
 
-/* 添加/换版本 选择器的状态 */
-const picker = { options: null, source: '', editing: false };
+/* 添加/改更新方式 选择器的状态
+   mode 是**独立的第二维**，别和来源混在一起：
+     · latest —— 跟随最新：自动用该仓库最新的正式版（默认，也是绝大多数场景）
+     · pin    —— 锁定版本：固定用某个 Release（回滚 / 避开有问题的版本）
+   早先没有这个维度，添加应用时强制选「版本 + 安装包」，于是**每个新加的应用都被
+   悄悄钉死在当时那个 tag 上**，上游再发新版就永远检测不到（实测踩过：wildwork
+   2.9.2 发布后一直报「已是最新」）。所以这里必须把「跟不跟着上游走」显式化。 */
+const picker = { options: null, source: '', editing: false, mode: 'latest' };
 
 /* ── 主题 ──
    三级来源：服务器设置（权威） > localStorage 缓存（避免首屏闪白） > 跟随系统。
@@ -281,7 +287,10 @@ function statusBadge(app, task, running) {
   // 有更新的版本、但不能自动更新（典型原因：该来源没有 sha256 摘要）。
   // 早先这种情况会掉到下面的「已是最新」——那是**误导**：明明有新版。
   if (app.relation === 'newer') return badge('有新版 · 不能自动更新', 'warn');
-  if (app.relation === 'older') return badge('已钉旧版', 'wait');
+  // 锁定版本必须显式说出来，否则用户会把「锁定在最新」误读成「跟随最新」，
+  // 之后上游发新版就以为检测坏了（实测踩过）。
+  if (app.relation === 'older') return badge('已锁定旧版', 'wait');
+  if (app.pinned) return badge('已锁定 · 最新', 'wait');
   if (app.latest) return badge('已是最新', 'ok');
   return badge('未知', 'wait');
 }
@@ -1211,8 +1220,9 @@ function renderAppsList(list) {
     src.title = src.textContent;
     main.appendChild(src);
 
-    if (it.tag) main.appendChild(chipSmall('tag ' + it.tag));
-    if (it.asset) main.appendChild(chipSmall('包 ' + it.asset));
+    if (it.tag) main.appendChild(chipSmall('锁定 ' + it.tag));
+    if (it.tag && it.asset) main.appendChild(chipSmall('包 ' + it.asset));
+    if (!it.tag && !it.asset) main.appendChild(chipSmall('跟随最新'));
     if (it.allow_prerelease) main.appendChild(chipSmall('含预发布'));
 
     row.appendChild(main);
@@ -1221,18 +1231,38 @@ function renderAppsList(list) {
     const ops = document.createElement('div');
     ops.className = 'approw-ops';
 
-    // 换版本：把来源填回输入框并列出它的所有版本/安装包，供手动改钉
+    // 改更新方式：把来源填回输入框并列出它的所有版本/安装包。
+    // 按钮文案与弹窗状态必须**如实反映当前处于哪种方式** —— 这是用户最容易误解的地方：
+    //   · 跟随最新 → 打开后预选「跟随最新」，想锁定才切过去
+    //   · 已锁定   → 打开后预选「锁定版本」并定位到当前那个 tag/包，想解除就切回「跟随最新」
     const repin = document.createElement('button');
     repin.className = 'rm';
-    repin.textContent = '换版本';
-    repin.title = '改这个来源使用的版本 / 安装包';
+    repin.textContent = '更新方式';
+    repin.title = it.tag
+      ? ('当前锁定在 ' + it.tag + '（点这里改成跟随最新，或换一个版本）')
+      : '当前跟随最新（点这里可以锁定到某个版本）';
     repin.addEventListener('click', async () => {
       const src = it.repo || it.url;
       $('app-add-input').value = src;
       picker.editing = true;
+      picker.mode = it.tag ? 'pin' : 'latest';
       try {
         await loadOptions(src);
-        toast('选好新版本后点「保存」', 'ok');
+        // 锁定状态下把下拉定位到「当前真正在用的那个版本/包」，避免显示成最新版让人以为已经改过
+        if (picker.mode === 'pin' && it.tag) {
+          const rels = (picker.options && picker.options.releases) || [];
+          const vi = rels.findIndex((r) => r.tag === it.tag);
+          if (vi >= 0) {
+            $('ver-select').value = String(vi);
+            fillAssetSelect();
+            if (it.asset) {
+              const ai = (rels[vi].assets || []).findIndex((a) => a.name === it.asset);
+              if (ai >= 0) $('asset-select').value = String(ai);
+            }
+          }
+        }
+        toast(picker.mode === 'pin' ? '当前是「锁定版本」，要跟随上游请切到「跟随最新」'
+                                    : '当前是「跟随最新」，要固定版本请切到「锁定版本」', 'ok', 5000);
       } catch (e) {
         toast(e.message, 'err');
       }
@@ -2187,9 +2217,38 @@ function showPicker() {
   if (def < 0) def = 0;
   sel.value = String(def);
   fillAssetSelect();
+  syncModeUI();
   box.classList.remove('hidden');
   $('app-preview').classList.add('hidden');
   $('app-confirm-btn').textContent = picker.editing ? '保存' : '添加';
+}
+
+/* 把「更新方式」这一维同步到界面：分段高亮 + 说明 + 版本/安装包两行显隐。
+   跟随最新时**隐藏**两个下拉（而不是置灰）—— 置灰会让人以为「还得选点什么」，
+   而这正是旧版最容易被误解的地方。 */
+function syncModeUI() {
+  const seg = $('mode-seg');
+  if (seg) {
+    [...seg.querySelectorAll('button')].forEach((b) => {
+      b.classList.toggle('on', b.dataset.mode === picker.mode);
+    });
+  }
+  const pin = picker.mode === 'pin';
+  const vr = $('ver-row');
+  const ar = $('asset-row');
+  if (vr) vr.classList.toggle('hidden', !pin);
+  if (ar) ar.classList.toggle('hidden', !pin);
+  const hint = $('mode-hint');
+  if (hint) {
+    hint.textContent = pin
+      ? '锁定版本：始终使用你选定的那个版本，上游发了新版也不会自动跟。适合回滚，或暂时避开有问题的版本。'
+      : '跟随最新：自动使用该仓库最新的正式版（预发布/滚动版不会跟）。上游发版后，检测会直接提示可更新。';
+  }
+  if (!pin) {
+    // 切回「跟随最新」时清掉预览结果：那份结果是按钉住的版本算的，留着会误导。
+    const pv = $('app-preview');
+    if (pv) pv.classList.add('hidden');
+  }
 }
 
 async function loadOptions(source) {
@@ -2205,7 +2264,12 @@ function currentPick() {
   const rel = picker.options.releases[vi];
   const ai = parseInt($('asset-select').value, 10) || 0;
   const asset = (rel.assets || [])[ai];
-  return { tag: rel.tag || '', asset: asset ? asset.name : '', release: rel, assetRow: asset };
+  // 「跟随最新」时**不带** tag/asset —— 带了就等于把当前这一版钉死，
+  // 上游以后发新版检测不到。这是旧版最坑的地方，务必保持为空。
+  if (picker.mode !== 'pin') {
+    return { mode: 'latest', tag: '', asset: '', release: rel, assetRow: null };
+  }
+  return { mode: 'pin', tag: rel.tag || '', asset: asset ? asset.name : '', release: rel, assetRow: asset };
 }
 
 $('app-add-btn').addEventListener('click', async () => {
@@ -2214,15 +2278,24 @@ $('app-add-btn').addEventListener('click', async () => {
   const btn = $('app-add-btn');
   busyOn(btn, '正在读取仓库…');
   picker.editing = false;
+  picker.mode = 'latest';        // 新增默认「跟随最新」，不要顺手把当前版本钉死
   try {
     await loadOptions(raw);
-    toast('选好版本和安装包后点「添加」', 'ok');
+    toast('选好更新方式后点「添加」', 'ok');
   } catch (e) {
     $('app-picker').classList.add('hidden');
     toast(e.message, 'err');
   } finally {
     busyOff(btn);
   }
+});
+
+/* 更新方式切换：只改状态与显隐，不联网 */
+$('mode-seg').addEventListener('click', (ev) => {
+  const b = ev.target.closest('button[data-mode]');
+  if (!b) return;
+  picker.mode = b.dataset.mode === 'pin' ? 'pin' : 'latest';
+  syncModeUI();
 });
 
 $('ver-select').addEventListener('change', fillAssetSelect);
@@ -2270,16 +2343,17 @@ $('app-confirm-btn').addEventListener('click', async () => {
     if (picker.editing) {
       await api('/api/apps/pin', {
         method: 'POST',
-        body: { source: picker.source, tag: p.tag, asset: p.asset },
+        body: { source: picker.source, mode: p.mode, tag: p.tag, asset: p.asset },
       });
-      toast('已保存', 'ok');
+      toast(p.mode === 'pin' ? ('已锁定到 ' + p.tag) : '已改为跟随最新', 'ok');
     } else {
       const r = await api('/api/apps/add', {
         method: 'POST',
-        body: { source: picker.source, tag: p.tag, asset: p.asset },
+        body: { source: picker.source, mode: p.mode, tag: p.tag, asset: p.asset },
       });
       toast('已加入 ' + (r.appname || '')
-        + (r.installed === false ? '（本机未安装：可在卡片里直接安装）' : ''), 'ok', 6500);
+        + (p.mode === 'pin' ? '（锁定 ' + p.tag + '）' : '（跟随最新）')
+        + (r.installed === false ? '，本机未安装：可在卡片里直接安装' : ''), 'ok', 6500);
       $('app-add-input').value = '';
     }
     $('app-picker').classList.add('hidden');

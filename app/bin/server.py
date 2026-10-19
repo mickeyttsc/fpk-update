@@ -1536,6 +1536,12 @@ def check_one(app, force=False):
         "local_unknown": None,
         "detected_appname": None,
         "sha256": "",
+        # 「更新方式」是独立的一维，必须显式回传：界面要据此显示「跟随最新 / 锁定 vX」，
+        # 而不是让用户从 tag 字段去猜（tag 这里是**解析出来的**目标 tag，跟随最新时
+        # 它等于最新版，看起来就像被钉住了）。
+        "pinned": bool(app.get("tag") or app.get("asset")),
+        "pinned_tag": app.get("tag") or "",
+        "pinned_asset": app.get("asset") or "",
     }
     try:
         rel = resolve_source(app, force=force)
@@ -4269,24 +4275,43 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     new_item["url"] = src["url"]
                 new_item["display"] = rel.get("display_name") or appname
-                if src["tag"]:
-                    new_item["tag"] = src["tag"]
-                if src["asset"]:
-                    new_item["asset"] = src["asset"]
+                # 只有显式「锁定版本」才写 tag/asset。默认跟随最新时**必须留空** ——
+                # 否则新增的每一条都会被悄悄钉死在当时的版本上（实测就是这么把
+                # wildwork 2.9.2 一直检测不出来的）。
+                mode = str(body.get("mode") or "").strip().lower()
+                if mode not in ("latest", "pin"):
+                    mode = "pin" if (src["tag"] or src["asset"]) else "latest"
+                if mode == "pin":
+                    if src["tag"]:
+                        new_item["tag"] = src["tag"]
+                    if src["asset"]:
+                        new_item["asset"] = src["asset"]
                 doc["apps"].append(new_item)
                 save_whitelist(doc)
-            log("新增被管理应用：%s（来源 %s，版本 %s，包 %s%s）"
+            log("新增被管理应用：%s（来源 %s，版本 %s，包 %s，更新方式 %s%s）"
                 % (appname, src["repo"] or src["url"], rel["version"], rel["asset_name"],
+                   "锁定" if mode == "pin" else "跟随最新",
                    "" if was_installed else "，本机未安装"))
             return self._json({"ok": True, "appname": appname, "installed": was_installed,
                                "apps": load_whitelist()})
 
         if path == "/api/apps/pin":
-            # 给已有条目换版本 / 换安装包（不改来源）
+            # 改一条已有条目的「更新方式」：
+            #   mode="latest" → 跟随最新（清掉 tag/asset）
+            #   mode="pin"    → 锁定到指定 tag（可再指定 asset）
+            # 不传 mode 时按 tag/asset 是否为空推断，保持与旧前端的兼容。
             body = self._read_body()
             key = str(body.get("source") or "").strip()
             tag = str(body.get("tag") or "").strip()
             asset = str(body.get("asset") or "").strip()
+            mode = str(body.get("mode") or "").strip().lower()
+            if mode not in ("latest", "pin"):
+                mode = "pin" if (tag or asset) else "latest"
+            if mode == "latest":
+                tag = ""
+                asset = ""
+            elif not tag and not asset:
+                return self._err(400, "锁定版本必须指定版本或安装包")
             if not key:
                 return self._err(400, "缺少 source")
 
@@ -4344,7 +4369,9 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     hit.pop("asset", None)
                 save_whitelist(doc)
-            log("已改钉版本：%s -> tag=%s asset=%s" % (key, tag or "（自动最新）", asset or "（自动挑）"))
+            log("已改更新方式：%s -> %s" % (
+                key, "跟随最新" if mode == "latest"
+                else ("锁定 tag=%s asset=%s" % (tag or "（未指定）", asset or "（自动挑）"))))
             return self._json({"ok": True, "apps": load_whitelist()})
 
 
