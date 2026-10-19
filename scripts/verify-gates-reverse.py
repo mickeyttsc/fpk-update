@@ -34,8 +34,8 @@ BREAKS = [
      "    if True:\n        d = _load_registry()\n        d[p] = {"),
     ("main 里不调自愈", "    _recover_stale_tasks()\n    _worker_thread", "    _worker_thread"),
     ("GitHub 请求不重试", "GH_RETRIES = 2", "GH_RETRIES = 0"),
-    ("指定的附件对不上时静默替换", "pattern=src[\"asset\"] or None, strict=True)",
-     "pattern=src[\"asset\"] or None)"),
+    ("指定的附件对不上时静默替换", 'locked=bool(src["tag"]),',
+     'locked=False,'),
     ("清理不再处理下载残留", '''    parts, parts_freed = [], 0
     for it in orphan_parts():
         if not it["old_enough"]:

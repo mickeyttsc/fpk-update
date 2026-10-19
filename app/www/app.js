@@ -1221,8 +1221,8 @@ function renderAppsList(list) {
     main.appendChild(src);
 
     if (it.tag) main.appendChild(chipSmall('锁定 ' + it.tag));
-    if (it.tag && it.asset) main.appendChild(chipSmall('包 ' + it.asset));
-    if (!it.tag && !it.asset) main.appendChild(chipSmall('跟随最新'));
+    else main.appendChild(chipSmall('跟随最新'));
+    if (it.asset) main.appendChild(chipSmall('包 ' + it.asset));
     if (it.allow_prerelease) main.appendChild(chipSmall('含预发布'));
 
     row.appendChild(main);
@@ -2223,9 +2223,11 @@ function showPicker() {
   $('app-confirm-btn').textContent = picker.editing ? '保存' : '添加';
 }
 
-/* 把「更新方式」这一维同步到界面：分段高亮 + 说明 + 版本/安装包两行显隐。
-   跟随最新时**隐藏**两个下拉（而不是置灰）—— 置灰会让人以为「还得选点什么」，
-   而这正是旧版最容易被误解的地方。 */
+/* 把「更新方式」这一维同步到界面。
+   跟随最新：**隐藏版本下拉**（版本由上游决定），但**保留安装包下拉** ——
+     安装包选的是「这台机器用哪个」（x86/arm、iframe/url），只有用户知道，
+     而且要一路记着走。旧版每次自动猜架构，猜错就是「装不上还看不懂为什么」。
+   锁定版本：两个下拉都在。 */
 function syncModeUI() {
   const seg = $('mode-seg');
   if (seg) {
@@ -2235,19 +2237,12 @@ function syncModeUI() {
   }
   const pin = picker.mode === 'pin';
   const vr = $('ver-row');
-  const ar = $('asset-row');
   if (vr) vr.classList.toggle('hidden', !pin);
-  if (ar) ar.classList.toggle('hidden', !pin);
   const hint = $('mode-hint');
   if (hint) {
     hint.textContent = pin
-      ? '锁定版本：始终使用你选定的那个版本，上游发了新版也不会自动跟。适合回滚，或暂时避开有问题的版本。'
-      : '跟随最新：自动使用该仓库最新的正式版（预发布/滚动版不会跟）。上游发版后，检测会直接提示可更新。';
-  }
-  if (!pin) {
-    // 切回「跟随最新」时清掉预览结果：那份结果是按钉住的版本算的，留着会误导。
-    const pv = $('app-preview');
-    if (pv) pv.classList.add('hidden');
+      ? '锁定版本：版本和安装包都固定，上游发新版也不跟。适合回滚或暂时避开有问题的版本。'
+      : '跟随最新：版本自动跟上游最新的正式版；安装包固定用你选的那个，以后升级继续用它（不用每次重新选）。';
   }
 }
 
@@ -2264,12 +2259,11 @@ function currentPick() {
   const rel = picker.options.releases[vi];
   const ai = parseInt($('asset-select').value, 10) || 0;
   const asset = (rel.assets || [])[ai];
-  // 「跟随最新」时**不带** tag/asset —— 带了就等于把当前这一版钉死，
-  // 上游以后发新版检测不到。这是旧版最坑的地方，务必保持为空。
-  if (picker.mode !== 'pin') {
-    return { mode: 'latest', tag: '', asset: '', release: rel, assetRow: null };
-  }
-  return { mode: 'pin', tag: rel.tag || '', asset: asset ? asset.name : '', release: rel, assetRow: asset };
+  // 版本维：只有「锁定版本」才带 tag。跟随最新时带 tag 就等于把版本钉死，
+  // 上游以后发新版检测不到 —— 这是旧版最坑的地方。
+  // 安装包维：两种模式都带。它记的是「这台机器用哪个包」，要一路跟着走。
+  const tag = picker.mode === 'pin' ? (rel.tag || '') : '';
+  return { mode: picker.mode, tag: tag, asset: asset ? asset.name : '', release: rel, assetRow: asset };
 }
 
 $('app-add-btn').addEventListener('click', async () => {

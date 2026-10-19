@@ -211,14 +211,24 @@ def main():
 
     # ── 3. 指定附件对不上时必须报错，不能静默换成别的包 ──
     print("▸ 指定的安装包对不上时不许静默替换")
-    assets = [{"name": "x-x86.fpk", "size": 10}, {"name": "x-arm.fpk", "size": 20}]
+    assets = [{"name": "x-1.0-x86.fpk", "size": 10}, {"name": "x-1.0-arm.fpk", "size": 20}]
+    # 锁定版本（locked=True）时，名字对不上必须报错 —— 回退可能挑到另一个架构/形态
     try:
-        s._pick_asset(assets, want_arch="x86", pattern="不存在的.fpk", strict=True)
-        chk(False, "strict 模式应当报错")
+        s._choose_asset(assets, "不存在的.fpk", locked=True)
+        chk(False, "锁定版本时对不上应当报错")
     except Exception as exc:                          # noqa: BLE001
-        chk("不存在" in str(exc) and "x-x86.fpk" in str(exc), "报错并列出可选项", str(exc)[:80])
-    got = s._pick_asset(assets, want_arch="x86", pattern="x-*.fpk")
-    chk(got["name"] == "x-x86.fpk", "通配符命中时仍按架构挑", got.get("name"))
+        chk("不存在" in str(exc) and "x-1.0-x86.fpk" in str(exc), "报错并列出可选项", str(exc)[:80])
+    # 跟随最新（locked=False）时允许「同形态、版本号不同」——这是记住包形态的主路径
+    newer = [{"name": "x-2.0-x86.fpk", "size": 10}, {"name": "x-2.0-arm.fpk", "size": 20}]
+    got = s._choose_asset(newer, "x-1.0-x86.fpk", locked=False)
+    chk(got["name"] == "x-2.0-x86.fpk", "记住的包形态能跟着新版本走（x86 → x86）", got.get("name"))
+    # 形态也对不上时才回退到按架构打分（否则上游一改命名就整条链路断掉）
+    got2 = s._choose_asset([{"name": "y-2.0-arm.fpk", "size": 5},
+                            {"name": "y-2.0-x86.fpk", "size": 6}],
+                           "z-1.0-x86.fpk", locked=False)
+    chk(got2["name"] == "y-2.0-x86.fpk", "形态对不上时按架构回退（不是直接报错）", got2.get("name"))
+    got3 = s._pick_asset(assets, want_arch="x86", pattern="x-*.fpk")
+    chk(got3["name"] == "x-1.0-x86.fpk", "通配符命中时仍按架构挑", got3.get("name"))
 
     # ── 4. 下载残留（孤儿分片）──
     print("▸ 下载残留清理")
@@ -444,7 +454,7 @@ def main():
            "display_name": "X", "platform": "all", "tag": "v9.9", "asset_name": "app-a.fpk",
            "asset_url": "http://x/a.fpk", "sha256": _hl.sha256(real).hexdigest(),
            "size": len(real), "published_at": None, "notes": "", "source_kind": "repo"}
-    s.resolve_source = lambda entry, force=False: rel
+    s.resolve_source = lambda entry, force=False, want_arch=None: rel
     s.installed_version = lambda n: "9.0"
     s.installed_display = lambda n: "Installed One"
     s.device_arch = lambda: "x86"
@@ -682,8 +692,13 @@ def main():
     # 否则把 strict 去掉、把校验删掉，函数级测试照样全绿（实测过这种假绿）。
     print("▸ 关键修复点的接线")
     src_text = open(src, encoding="utf-8").read()
-    chk('pattern=src["asset"] or None, strict=True)' in src_text,
-        "resolve_source 挑选附件时用了 strict（对不上要报错，不许悄悄换包）")
+    # 锁定版本时必须走 locked=True（对不上要报错）；跟随最新走 locked=False（按形态跟）。
+    chk('_choose_asset(rel["assets"], src["asset"], locked=bool(src["tag"])' in src_text,
+        "resolve_source 挑包走 _choose_asset，并按「是否锁定版本」决定严格度")
+    chk('locked=True（用户锁定了版本）' in src_text or "if locked:" in src_text,
+        "_choose_asset 里保留了 locked 分支（锁定对不上要报错，不许悄悄换包）")
+    chk("_asset_shape(" in src_text and "installed_platform(" in src_text,
+        "记住了包形态、并以已装 platform 为架构锚点（后续更新跟进已装版本）")
     chk("find_release(target_repo, True, tag)" in src_text and "改钉失败" in src_text,
         "钉版本前会校验 tag / 附件真实存在")
     chk("_safe_unlink_part(" in src_text and "orphan_parts(" in src_text,

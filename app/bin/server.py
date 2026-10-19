@@ -311,6 +311,29 @@ def installed_display(appname):
     return None
 
 
+def installed_platform(appname):
+    """读**已安装**那个包的 platform，用于「后续更新跟进已装版本」。
+
+    这是用户要的语义：第一次装的是哪个架构的包，以后升级就按那个架构挑，
+    不用每次重新猜。比记包名更稳 —— 它来自 fnOS 自己记录的那份 manifest。
+    返回 x86 / arm / ''（认不出）。
+    """
+    if not appname:
+        return ""
+    path = os.path.join(APPS_ROOT, appname, "manifest")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("platform"):
+                    parts = line.split("=", 1)
+                    if len(parts) == 2:
+                        v = norm_platform(parts[1])
+                        return v if v in ("x86", "arm") else ""
+    except OSError:
+        pass
+    return ""
+
+
 def installed_port(appname):
     """读取已安装应用的对外服务端口（从 manifest service_port 字段读取）。"""
     path = os.path.join(APPS_ROOT, appname, "manifest")
@@ -529,6 +552,22 @@ def device_arch():
     if m in ("aarch64", "arm64", "armv8l", "armv7l"):
         return "arm"
     return "x86"
+
+
+# manifest 里的 platform 字段各家用词不统一：实测 fnOS 自家应用写 `x86`，
+# 第三方常写 `amd64` / `x86_64` / `aarch64` / `arm64`，还有带引号和大写的。
+# 只认字面量 x86/arm/all 会把「其实是本机架构」的包误判成架构不符、直接拒绝安装，
+# 而且报错信息看起来像仓库的问题。这里统一归一。
+_PLATFORM_ALIAS = {
+    "x86": "x86", "x86_64": "x86", "x64": "x86", "amd64": "x86", "i386": "x86", "i686": "x86",
+    "arm": "arm", "arm64": "arm", "aarch64": "arm", "armv7": "arm", "armv7l": "arm", "armv8l": "arm",
+}
+
+
+def norm_platform(v):
+    """把 platform 值归一成 x86 / arm；认不出时原样返回（交给调用方判不等）。"""
+    s = str(v or "").strip().strip('"').strip("'").lower()
+    return _PLATFORM_ALIAS.get(s, s)
 
 
 def _load_manifest_cache():
@@ -984,6 +1023,58 @@ def wizard_spec_for(app, rel):
 
 # ───────────────────────────── 源解析（仓库 / 直链） ─────────────────────────────
 
+def _asset_shape(name):
+    """把包名里的版本号抹成 `*`，得到「形态模式」。
+
+    例：`lemon-music-<版本>-x86.fpk`        → `lemon-music-*-x86.fpk`
+        `FanControlServer-<版本>-linux-amd64-iframe.fpk` → `FanControlServer-*-linux-amd64-iframe.fpk`
+        `cleanfnos_<版本>_x86.fpk`           → `cleanfnos_*_x86.fpk`
+
+    为什么要有它：用户第一次选的是「这台机器用的那个包」（x86/arm、iframe/url），
+    这件事只有他当时知道。上游下个版本文件名里的版本号会变，但形态部分不变 ——
+    把版本号抹掉当模式去匹配，就能一路跟着**已装的那个包**走，不用每次重新猜。
+    """
+    return re.sub(r"[vV]?\d+(?:[.\-_]\d+)+", "*", str(name or ""))
+
+
+def _choose_asset(assets, wanted, locked=False, want_arch=None):
+    """挑安装包：优先「跟住用户首次选中的那个包的形态」，而不是每次重新猜架构。
+
+    locked=True（用户锁定了版本）：精确指定却匹配不到 → **报错，绝不回退**。
+        回退可能挑到另一个架构或另一个入口形态，用户以为钉的是 A、实际装的是 B。
+    locked=False（跟随最新）：形态匹配不上就退回按架构/形态打分自动挑。
+        这里回退是**必要**的 —— 上游可能改了命名规则，回退总比整条更新链路断掉好。
+    want_arch：架构锚点。传「已安装那个包的 platform」进来，就实现了
+        「后续更新跟进已装版本」—— 第一次装的是 x86，以后永远按 x86 挑。
+    """
+    import fnmatch
+    cands = list(assets)
+    if not cands:
+        raise RuntimeError("没有可供挑选的 .fpk 附件")
+    wanted = str(wanted or "").strip()
+
+    if wanted:
+        # ① 精确命中（同一个 Release 里的那个包，原样还在）
+        hit = [a for a in cands if str(a.get("name") or "") == wanted]
+        if hit:
+            return hit[0]
+        # ② 用户自己写了通配符
+        if any(ch in wanted for ch in "*?["):
+            hit = [a for a in cands if fnmatch.fnmatch(str(a.get("name") or ""), wanted)]
+            if hit:
+                return _pick_asset(hit, want_arch=want_arch)
+        # ③ 形态匹配：抹掉版本号再比 —— 这才是「跟着已装的包走」的主力路径
+        shape = _asset_shape(wanted)
+        hit = [a for a in cands
+               if fnmatch.fnmatch(_asset_shape(str(a.get("name") or "")), shape)]
+        if hit:
+            return _pick_asset(hit, want_arch=want_arch)
+        if locked:
+            raise RuntimeError("这个 Release 里没有匹配「%s」的 .fpk 附件；可选：%s"
+                               % (wanted, "、".join(str(a.get("name")) for a in cands)))
+    return _pick_asset(cands, want_arch=want_arch)
+
+
 def _pick_asset(assets, want_arch=None, pattern=None, strict=False):
     """在多个 .fpk 附件里挑一个。
 
@@ -1280,7 +1371,7 @@ def _version_from_tag(tag):
     return v if split_version(v) is not None else ""
 
 
-def resolve_source(entry, force=False):
+def resolve_source(entry, force=False, want_arch=None):
     """解析一条配置 → 目标版本信息。
 
     版本优先取 **fpk 自身的 manifest**（权威，与 fnOS 安装时读的是同一份）；
@@ -1304,10 +1395,8 @@ def resolve_source(entry, force=False):
         rel = find_release(src["repo"], src["allow_prerelease"], src["tag"], force=force)
         if not rel:
             raise RuntimeError("仓库 %s 没有可用的 Release（含 .fpk 附件）" % src["repo"])
-        # strict：用户显式指定了 asset 而名字对不上时直接报错。
-        # 静默回退成「自动挑」会很危险 —— 可能挑到另一个架构或另一个入口形态的包，
-        # 用户以为钉的是 A、实际装的是 B。
-        asset = _pick_asset(rel["assets"], pattern=src["asset"] or None, strict=True)
+        asset = _choose_asset(rel["assets"], src["asset"], locked=bool(src["tag"]),
+                              want_arch=want_arch)
         asset_url = asset.get("browser_download_url")
         asset_name = asset.get("name")
         digest = str(asset.get("digest") or "")
@@ -1536,15 +1625,20 @@ def check_one(app, force=False):
         "local_unknown": None,
         "detected_appname": None,
         "sha256": "",
-        # 「更新方式」是独立的一维，必须显式回传：界面要据此显示「跟随最新 / 锁定 vX」，
-        # 而不是让用户从 tag 字段去猜（tag 这里是**解析出来的**目标 tag，跟随最新时
-        # 它等于最新版，看起来就像被钉住了）。
-        "pinned": bool(app.get("tag") or app.get("asset")),
+        # 「更新方式」两维，必须分别回传，别让用户从 tag 去猜：
+        #   pinned（锁定版本）= 版本被冻结；asset（记住的包）与它无关 ——
+        #   跟随最新时也可能记着「这台机器用哪个包」（x86/arm、iframe/url），
+        #   那是首次选择的结果，不是锁定。
+        "pinned": bool(app.get("tag")),
         "pinned_tag": app.get("tag") or "",
-        "pinned_asset": app.get("asset") or "",
+        "asset": app.get("asset") or "",
+        "asset_shape": _asset_shape(app.get("asset") or "") if app.get("asset") else "",
     }
     try:
-        rel = resolve_source(app, force=force)
+        # 「后续更新跟进已装版本」：把已安装那个包的 platform 作为架构锚点传下去，
+        # 这样即使配置里没记包名（老数据），也不会挑到对端架构的包。
+        rel = resolve_source(app, force=force,
+                             want_arch=installed_platform(app["appname"]) or None)
     except urllib.error.HTTPError as exc:
         item["error"] = _gh_error_message(exc)
         return item
@@ -1581,7 +1675,7 @@ def check_one(app, force=False):
 
     # 架构对不上就别动
     plat = (rel.get("platform") or "").strip().lower()
-    if plat and plat not in ("all", device_arch()):
+    if plat and plat not in ("all", device_arch()) and norm_platform(plat) != device_arch():
         item["error"] = ("安装包面向 %s，本机是 %s —— 已跳过" % (plat, device_arch()))
         return item
 
@@ -4275,22 +4369,23 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     new_item["url"] = src["url"]
                 new_item["display"] = rel.get("display_name") or appname
-                # 只有显式「锁定版本」才写 tag/asset。默认跟随最新时**必须留空** ——
+                # 只有显式「锁定版本」才写 tag。默认跟随最新时**必须留空** ——
                 # 否则新增的每一条都会被悄悄钉死在当时的版本上（实测就是这么把
                 # wildwork 2.9.2 一直检测不出来的）。
+                # 但 asset **要写**：它记的是「这台机器用哪个包」（x86/arm、iframe/url），
+                # 是用户首次选择的结果，后续更新靠它一路跟着，不用每次重新猜。
                 mode = str(body.get("mode") or "").strip().lower()
                 if mode not in ("latest", "pin"):
-                    mode = "pin" if (src["tag"] or src["asset"]) else "latest"
-                if mode == "pin":
-                    if src["tag"]:
-                        new_item["tag"] = src["tag"]
-                    if src["asset"]:
-                        new_item["asset"] = src["asset"]
+                    mode = "pin" if src["tag"] else "latest"
+                if mode == "pin" and src["tag"]:
+                    new_item["tag"] = src["tag"]
+                if src["asset"]:
+                    new_item["asset"] = src["asset"]
                 doc["apps"].append(new_item)
                 save_whitelist(doc)
             log("新增被管理应用：%s（来源 %s，版本 %s，包 %s，更新方式 %s%s）"
                 % (appname, src["repo"] or src["url"], rel["version"], rel["asset_name"],
-                   "锁定" if mode == "pin" else "跟随最新",
+                   ("锁定 " + src["tag"]) if (mode == "pin" and src["tag"]) else "跟随最新",
                    "" if was_installed else "，本机未安装"))
             return self._json({"ok": True, "appname": appname, "installed": was_installed,
                                "apps": load_whitelist()})
@@ -4306,12 +4401,11 @@ class Handler(BaseHTTPRequestHandler):
             asset = str(body.get("asset") or "").strip()
             mode = str(body.get("mode") or "").strip().lower()
             if mode not in ("latest", "pin"):
-                mode = "pin" if (tag or asset) else "latest"
+                mode = "pin" if tag else "latest"
             if mode == "latest":
+                # 跟随最新 = 版本不冻结，但**保留**记住的包形态（首次选的那个 x86/arm、
+                # iframe/url）。把 asset 也清掉就等于让程序每次重新猜架构，正是要避免的。
                 tag = ""
-                asset = ""
-            elif not tag and not asset:
-                return self._err(400, "锁定版本必须指定版本或安装包")
             if not key:
                 return self._err(400, "缺少 source")
 
@@ -4340,7 +4434,9 @@ class Handler(BaseHTTPRequestHandler):
                     rel = find_release(target_repo, True, tag) if tag else \
                         find_release(target_repo, True, "")
                     if asset:
-                        _pick_asset(rel["assets"], pattern=asset, strict=True)
+                        # 锁定版本时用严格校验（钉了就得真有）；只改包形态时用
+                        # _choose_asset 的形态匹配，允许「同形态、版本号不同」。
+                        _choose_asset(rel["assets"], asset, locked=bool(tag))
                 except ValueError as exc:
                     return self._err(400, "改钉失败：%s" % exc)
                 except urllib.error.HTTPError as exc:
