@@ -699,6 +699,15 @@ def main():
         "_choose_asset 里保留了 locked 分支（锁定对不上要报错，不许悄悄换包）")
     chk("_asset_shape(" in src_text and "installed_platform(" in src_text,
         "记住了包形态、并以已装 platform 为架构锚点（后续更新跟进已装版本）")
+    # 自愈路径的自动清理必须排除「自己这条任务」：此刻它在磁盘上仍是 running，
+    # 不排除就会被判成「正被进行中的任务使用」而永不清理（实测包一直留着）。
+    import re as _re
+    _rec = _re.search(r"def _recover_stale_tasks\(.*?(?=\ndef )", src_text, _re.S)
+    _rec_body = _rec.group(0) if _rec else ""
+    # 两处调用都要带（普通应用那处 + 升级自己那处）；只查「出现过」会被另一处蒙过去。
+    chk(_rec_body.count('ignore_tid=t.get("id")') >= 2,
+        "自愈路径清理安装包时传了 ignore_tid（两处都要，否则包永远删不掉）",
+        "命中 %d 处" % _rec_body.count('ignore_tid=t.get("id")'))
     chk("find_release(target_repo, True, tag)" in src_text and "改钉失败" in src_text,
         "钉版本前会校验 tag / 附件真实存在")
     chk("_safe_unlink_part(" in src_text and "orphan_parts(" in src_text,

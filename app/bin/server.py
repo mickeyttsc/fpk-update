@@ -4691,13 +4691,19 @@ def _recover_stale_tasks():
                     log("启动自愈：%s 的 %s 任务在重启前已完成（已装 %s）"
                         % (t.get("appname"), t.get("action"), t.get("version")))
                     # 升级成功且开启了自动清理：把刚装好的包清理掉！
+                    # ⚠️ 必须传 ignore_tid：此刻这条任务在**磁盘上**仍是 running
+                    # （状态改了但要等循环外的 _save_tasks 才落盘），而 _package_in_use
+                    # 读的是磁盘 —— 不排除自己的话会永远判成「正被进行中的任务使用」，
+                    # 结果是「升级成功但包一直留着」。实测日志里这一条重复出现了十几次。
                     pkg_path = t.get("path")
                     if pkg_path and os.path.isfile(pkg_path):
-                        clean_after_install(t.get("appname"), pkg_path, t.get("version"))
+                        clean_after_install(t.get("appname"), pkg_path, t.get("version"),
+                                            ignore_tid=t.get("id"))
                     elif t.get("appname") == APP_NAME:
                         self_pkg = os.path.join(download_dir(), "fpk-update-%s.fpk" % t.get("version"))
                         if os.path.isfile(self_pkg):
-                            clean_after_install(APP_NAME, self_pkg, t.get("version"))
+                            clean_after_install(APP_NAME, self_pkg, t.get("version"),
+                                                ignore_tid=t.get("id"))
                 t["finished_at"] = now_iso()
                 t["updated_at"] = now_iso()
                 n += 1

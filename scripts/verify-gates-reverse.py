@@ -36,6 +36,8 @@ BREAKS = [
     ("GitHub 请求不重试", "GH_RETRIES = 2", "GH_RETRIES = 0"),
     ("指定的附件对不上时静默替换", 'locked=bool(src["tag"]),',
      'locked=False,'),
+    ("自愈路径清理不再排除自己这条任务", 'clean_after_install(t.get("appname"), pkg_path, t.get("version"),\n                                            ignore_tid=t.get("id"))',
+     'clean_after_install(t.get("appname"), pkg_path, t.get("version"))'),
     ("清理不再处理下载残留", '''    parts, parts_freed = [], 0
     for it in orphan_parts():
         if not it["old_enough"]:

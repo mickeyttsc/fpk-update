@@ -1,5 +1,5 @@
 appname               = fpk-update
-version               = 1.4.2
+version               = 1.4.3
 display_name          = FPK更新
 desc                  = 一个 GitHub 上 fpk 的下载更新器：填个仓库地址，它自己识别版本、后台下载、校验 sha256，你点一下就能装上。已装的应用就地升级；没装的也能在这里直接完整安装（可选存储空间，装好自动启动）。下载可以自动，安装永远由你点。
 maintainer            = Mickey
@@ -12,5 +12,5 @@ ctl_stop              = true
 service_port          = 18600
 desktop_uidir         = ui
 desktop_applaunchname = fpk-update.main
-changelog             = 1.4.2：①首次添加时选的安装包（x86/arm、iframe/url）会被记住，之后升级自动用同一个包，不用每次重新选、也不会再猜错架构；②已安装应用额外以「已装那个包的 platform」为架构锚点，老数据也能跟对；③platform 字段兼容 amd64/x86_64/aarch64/arm64 等写法（原先只认字面量 x86/arm，会误判成架构不符）。
+changelog             = 1.4.3：修复「更新成功后安装包没被删掉」——重启自愈那条路径在清理时没排除自己这条任务，永远被判成「正被进行中的任务使用」，于是包一直留着（日志里重复出现十几次）。
 checksum              =
