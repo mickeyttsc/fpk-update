@@ -590,6 +590,21 @@ try {
   console.log(`  ${okRb ? '✔' : '✘'} 换回旧版本（回滚）→ 按钮显示「安装」且可点  -> "${rb.map((b) => b.textContent).join('/')}"`);
   if (!okRb) bad++;
 
+  // ahead：本机包比发布版新（自建/CI 包还没发 Release）——
+  // 不能显示「已锁定旧版」（用户根本没锁版本），也不能给可点的「安装」。
+  // 这是用户实测反馈「fpk更新鉴别有问题」的那一档：已装 2.9.3-2 → 最新 2.9.3-1。
+  const ah = mk({ installed: '2.9.3-2', latest: '2.9.3-1',
+    update_available: false, relation: 'ahead', downloaded: null });
+  const ahCard = sandbox.__renderCard(ah);
+  const ahBtn = actBtns(ah);
+  const ahBadge = (ahCard.children.find((c) => c.className === 'c-head') || { children: [] })
+    .children.map((c) => c.textContent).join(' ');
+  const okAh = ahBtn.length === 1 && ahBtn[0].disabled === true
+    && ahBtn[0].textContent === '已装较新'
+    && /已装较新/.test(ahBadge) && !/已锁定旧版/.test(ahBadge);
+  console.log(`  ${okAh ? '✔' : '✘'} ahead（本机 2.9.3-2 高于发布版 2.9.3-1）→ 徽章「已装较新」+ 按钮禁用  -> 徽章="${ahBadge}" 按钮="${ahBtn.map((b) => b.textContent).join('/')}"`);
+  if (!okAh) bad++;
+
   // ── 未安装的应用（v1.3 完整安装）：下包 → 安装，两态自动切换 ──
   const un = mk({ uninstalled: true, installed: null, latest: '1.2',
     update_available: false, relation: 'uninstalled', downloaded: null });

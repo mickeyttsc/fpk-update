@@ -395,6 +395,9 @@ function statusBadge(app, task, running) {
   if (app.relation === 'newer') return badge('有新版 · 不能自动更新', 'warn');
   // 锁定版本必须显式说出来，否则用户会把「锁定在最新」误读成「跟随最新」，
   // 之后上游发新版就以为检测坏了（实测踩过）。
+  // 「已装比发布版新」不是锁定旧版：本地/CI 打过包但还没发 Release 时就是这种形态。
+  // 早先混成 older → 挂「已锁定旧版」，用户判成「鉴别坏了」（实测反馈）。
+  if (app.relation === 'ahead') return badge('已装较新', 'ok');
   if (app.relation === 'older') return badge('已锁定旧版', 'wait');
   if (app.pinned) return badge('已锁定 · 最新', 'wait');
   if (app.latest) return badge('已是最新', 'ok');
@@ -413,9 +416,12 @@ function versionRow(app) {
   box.appendChild(c1);
 
   if (app.latest && !same) {
-    box.appendChild(el('span', 'c-arrow', '→'));
+    // ahead：已装比发布版新。箭头反向 + 标签改「发布版」——
+    // 否则「已装 2.9.3-2 → 最新 2.9.3-1」读起来像要降级。
+    const ahead = app.relation === 'ahead';
+    box.appendChild(el('span', 'c-arrow', ahead ? '←' : '→'));
     const c2 = el('div', 'c-cell');
-    c2.appendChild(el('span', 'c-label', '最新'));
+    c2.appendChild(el('span', 'c-label', ahead ? '发布版' : '最新'));
     c2.appendChild(el('span', 'c-val new', app.latest));
     box.appendChild(c2);
   }
@@ -447,6 +453,15 @@ function staticState(app) {
     const row = el('div', 'c-state ' + cls);
     row.appendChild(el('span', 'c-state-ico', done ? '↓' : (lu ? '!' : '·')));
     row.appendChild(el('span', '', text));
+    return row;
+  }
+  // 本机比发布版新（自建包/CI 包没发 Release）：这是最容易被误读成「检测坏了」的状态，
+  // 必须把原因说清楚，而不是让用户对着 2.9.3-2 → 2.9.3-1 猜。
+  if (app.relation === 'ahead') {
+    const row = el('div', 'c-state muted');
+    row.appendChild(el('span', 'c-state-ico', '·'));
+    row.appendChild(el('span', '', '本机已装 ' + app.installed + '，比发布版 '
+      + app.latest + ' 新 —— 通常是自己打过包、还没发 Release；不会自动降级。'));
     return row;
   }
   const d = app.downloaded;
@@ -658,8 +673,11 @@ function renderCard(app) {
     return card;
   }
 
+  // ahead（本机比发布版新）同样是「无需操作」：按钮不能写「安装」，否则用户以为还能装，
+  // 点下去后端也只会回「比目标更新，未做改动」。
   const upToDate = !!app.installed && !!app.latest
-    && normVer(app.installed) === normVer(app.latest) && !app.update_available;
+    && (normVer(app.installed) === normVer(app.latest) || app.relation === 'ahead')
+    && !app.update_available;
   const localReady = !!(app.downloaded && app.downloaded.complete);
   const brokenLocal = !!(app.downloaded && app.downloaded.complete === false);
   const needAction = (!!app.latest && !upToDate) || brokenLocal
@@ -667,7 +685,8 @@ function renderCard(app) {
     || !!app.local_unknown;
   const actLabel = app.update_available ? '更新' : '安装';
   // 已是最新时按钮文案直接写「已是最新」：写「安装」会让用户以为还能点（截图反馈过）
-  const bAct = btn(upToDate ? '已是最新' : actLabel, 'primary sm',
+  const upToDateLabel = app.relation === 'ahead' ? '已装较新' : '已是最新';
+  const bAct = btn(upToDate ? upToDateLabel : actLabel, 'primary sm',
     () => doAction(app, 'update', actLabel, bAct),
     !app.latest ? '暂无可用版本'
       : (!needAction ? '已是最新，无需操作'

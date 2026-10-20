@@ -1692,9 +1692,19 @@ def check_one(app, force=False):
         item["relation"] = "uninstalled"
     else:
         item["update_available"] = is_newer(rel["version"], item["installed"])
-        # 关系：钉住的版本可能比已装的旧（用于回滚）—— 界面据此显示不同徽章
+        # 关系四档，别把「已装比发布版新」和「用户钉住旧版」混成一个（2026-10-20 实测踩过）：
+        #   newer = 来源有更新版（可升级）
+        #   same  = 一致
+        #   older = **用户钉了旧 tag**（回滚点），已装比钉住的版本新 → 徽章「已锁定旧版」
+        #   ahead = 没钉版本，但已装比来源最新还新（本地/CI 自建包尚未发 Release，
+        #           或仓库回滚了 Release）—— 这不是锁定，也不该显示「安装」
+        # 早先两者同记为 older，界面就在「已装 2.9.3-2 → 最新 2.9.3-1」上挂了「已锁定旧版」——
+        # 用户从没锁过版本，只能判成「检测坏了」。
         _c = cmp_version(rel["version"], item["installed"])
-        item["relation"] = {1: "newer", 0: "same", -1: "older"}.get(_c, "unknown")
+        if _c == -1 and not item.get("pinned"):
+            item["relation"] = "ahead"
+        else:
+            item["relation"] = {1: "newer", 0: "same", -1: "older"}.get(_c, "unknown")
     if not item["sha256"]:
         item["error"] = ("该来源没有 sha256 摘要，出于安全不会下载/安装"
                          "（可改用仓库来源，GitHub 的 Release 附件一般带 digest）")
@@ -2057,7 +2067,8 @@ def reconcile_state(st):
                 elif _c == 0:
                     a["relation"] = "same"
                 elif _c == -1:
-                    a["relation"] = "older"
+                    # 未钉版本 → ahead（本机包比发布版新）；钉了版本才是 older（回滚点）
+                    a["relation"] = "older" if a.get("pinned") else "ahead"
             else:
                 a["update_available"] = False
             # 校验已下载文件是否真实存在于磁盘

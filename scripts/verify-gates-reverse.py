@@ -179,7 +179,7 @@ FILE_BREAKS = [
 FE_BREAKS = [
     ("自更新后不再自动刷新界面", "  if (!selfUpdated && bootVersion", "  if (false)"),
     ("已是最新时按钮又写回「安装」",
-     "btn(upToDate ? '已是最新' : actLabel", "btn(actLabel"),
+     "btn(upToDate ? upToDateLabel : actLabel", "btn(actLabel"),
     ("成功时又留结果条（卡片不回到普通形态）",
      "  if (ok) return null;", "  if (false) return null;"),
     ("卡片改回全量重建（不再复用节点）",
