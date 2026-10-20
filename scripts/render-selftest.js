@@ -573,14 +573,48 @@ try {
   console.log(`  ${okNew ? '✔' : '✘'} 有新版本 → 只显示一个「更新」按钮且可点  -> "${newer.map((b) => b.textContent).join('/')}"`);
   if (!okNew) bad++;
 
-  const bad2 = actBtns(mk({ local_unknown: { name: 'a.fpk', size: 10, reason: '内容与 Release 不一致（可能是旧版本或没下完）' } }));
-  const okBad = bad2.length === 1 && bad2[0].disabled === false;
-  console.log(`  ${okBad ? '✔' : '✘'} 本地包核对不过 → 留出重取出口（可以点）`);
-  if (!okBad) bad++;
+  // 本地同名文件与 Release 不一致：
+  // 已是最新时它不是「待处理项」——按钮必须禁用、文案不能指向不存在的「下载」按钮。
+  const luSample = { name: 'a.fpk', size: 10, reason: '内容与 Release 不一致（可能是旧版本或没下完）' };
+  // 递归取整张卡片的可见文本（状态行嵌在容器里，只看第一层会漏）
+  const flatText = (e) => [e.textContent || '']
+    .concat((e.children || []).map(flatText)).join(' ');
+  // downloaded 必须是 null 才走到 localUnknownRow（台账里有包时状态行优先说包，不重复说外来文件）
+  const bad2App = mk({ local_unknown: luSample, downloaded: null });
+  const bad2Card = sandbox.__renderCard(bad2App);
+  const bad2 = actBtns(bad2App);
+  const bad2Text = flatText(bad2Card);
+  const luRow = (() => {
+    let hit = null;
+    const walk = (e) => { if (!hit && String(e.className || '').includes('c-state')) hit = e; (e.children || []).forEach(walk); };
+    walk(bad2Card);
+    return hit || { className: '' };
+  })();
+  const okBad2 = bad2.length === 1 && bad2[0].disabled === true
+    && bad2[0].textContent === '已是最新'
+    && !/点「下载」/.test(bad2Text) && /不会改动它/.test(bad2Text)
+    // 无需动作的事不挂橙色警告：整片飘黄等于没有警告（用户明确反馈过这点）
+    && !/warn/.test(luRow.className);
+  console.log(`  ${okBad2 ? '✔' : '✘'} 本地同名文件不一致 + 已是最新 → 按钮禁用且不给空头「下载」指引  -> "${bad2.map((b) => b.textContent).join('/')}"`);
+  if (!okBad2) bad++;
+
+  // 有新版时同一事实要留出真实入口：按钮可点，且提醒下载会覆盖同名文件
+  const bad3App = mk({ latest: '1.1', update_available: true, relation: 'newer',
+    local_unknown: luSample, downloaded: null });
+  const bad3Card = sandbox.__renderCard(bad3App);
+  const bad3 = actBtns(bad3App);
+  const bad3Text = flatText(bad3Card);
+  const okBad3 = bad3.length === 1 && bad3[0].disabled === false
+    && bad3[0].textContent === '更新' && /会覆盖它/.test(bad3Text);
+  console.log(`  ${okBad3 ? '✔' : '✘'} 本地同名文件不一致 + 有新版 → 按钮「更新」可点，并说明下载会覆盖  -> "${bad3.map((b) => b.textContent).join('/')}"`);
+  if (!okBad3) bad++;
 
   const inc = actBtns(mk({ downloaded: { version: '1.0', complete: false } }));
-  const okInc = inc.length === 1 && inc[0].disabled === false;
-  console.log(`  ${okInc ? '✔' : '✘'} 本地包不完整 → 也可以重新取`);
+  // 已是最新但本地包不完整 → 按钮可点，且文案必须写真实动作「重新下载」，
+  // 不能写「已是最新」却可点（点击会真的重新下载安装）。
+  const okInc = inc.length === 1 && inc[0].disabled === false
+    && inc[0].textContent === '重新下载';
+  console.log(`  ${okInc ? '✔' : '✘'} 本地包不完整 → 按钮写「重新下载」且可点  -> "${inc.map((b) => b.textContent).join('/')}"`);
   if (!okInc) bad++;
 
   // 换版本回滚：钉了旧版本、没有新版可升 → 按钮变「安装」，仍可点

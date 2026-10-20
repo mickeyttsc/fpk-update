@@ -490,13 +490,24 @@ function staticState(app) {
 function localUnknownRow(app) {
   const lu = app.local_unknown;
   if (!lu) return null;
-  // 已经有「本地安装包…」那条状态行时不再重复说（同一件事只说一次）
-  const row = el('div', 'c-state warn');
-  row.appendChild(el('span', 'c-state-ico', '!'));
   // 只在**内容真的对不上**时才提示（认包看的是字节，不是「谁下载的」——
   // 归档目录里的包常常是别的脚本下的，用「谁下的」当判据会把它们全误判成外来、还把「安装」禁掉）
-  row.appendChild(el('span', '', '本地同名文件' + (lu.reason ? '：' + lu.reason : '与这一版不一致')
-    + '（' + fmtSize(lu.size) + '）—— 点「下载」重新取一份会覆盖它'));
+  // 两态：
+  //  · 已是最新 → 中性陈述。此时没有「下载」可点，写「点下载」是空头支票；
+  //    该文件也不在「清理」范围内（foreign_packages 明确不会动它）。
+  //    配色也用 muted 而不是 warn：无需任何动作的事不该挂橙色警告（否则整片飘黄 = 没有警告）。
+  //  · 还有待装/待更新 → 橙色提醒，因为下载确实会覆盖它。
+  const upToDate = !!app.installed && !!app.latest
+    && (normVer(app.installed) === normVer(app.latest) || app.relation === 'ahead')
+    && !app.update_available;
+  // 已经有「本地安装包…」那条状态行时不再重复说（同一件事只说一次）
+  const row = el('div', 'c-state ' + (upToDate ? 'muted' : 'warn'));
+  row.appendChild(el('span', 'c-state-ico', upToDate ? '·' : '!'));
+  const head = '本地同名文件' + (lu.reason ? '：' + lu.reason : '与这一版不一致')
+    + '（' + fmtSize(lu.size) + '）';
+  row.appendChild(el('span', '', upToDate
+    ? head + '—— 通常是手工放置或自己构建的副本；本应用不会改动它，也不影响当前已装版本。'
+    : head + '—— 点「下载」重新取一份会覆盖它'));
   return row;
 }
 
@@ -680,13 +691,19 @@ function renderCard(app) {
     && !app.update_available;
   const localReady = !!(app.downloaded && app.downloaded.complete);
   const brokenLocal = !!(app.downloaded && app.downloaded.complete === false);
+  // local_unknown（下载目录里有个同名但内容不同的包）**不驱动主按钮**：
+  // 那是本应用明确「不会动」的外来文件（foreign_packages 只做如实告知），
+  // 已是最新时点主按钮只会重新下载同版本并重启服务，收益为零。
+  // 早先把它算进 needAction，于是「已是最新」的按钮却是可点的实心主按钮（实测反馈）。
   const needAction = (!!app.latest && !upToDate) || brokenLocal
-    || (localReady && normVer(app.downloaded.version) !== normVer(app.installed))
-    || !!app.local_unknown;
+    || (localReady && normVer(app.downloaded.version) !== normVer(app.installed));
   const actLabel = app.update_available ? '更新' : '安装';
   // 已是最新时按钮文案直接写「已是最新」：写「安装」会让用户以为还能点（截图反馈过）
+  // 按钮文案必须等于它真正会做的事：已是最新、却仍需动作（本地包不完整等）时，
+  // 写「已是最新」却可点 = 点了会重新下载安装，文案却让人以为不用点（实测反馈）。
   const upToDateLabel = app.relation === 'ahead' ? '已装较新' : '已是最新';
-  const bAct = btn(upToDate ? upToDateLabel : actLabel, 'primary sm',
+  const actText = upToDate ? (needAction ? '重新下载' : upToDateLabel) : actLabel;
+  const bAct = btn(actText, 'primary sm',
     () => doAction(app, 'update', actLabel, bAct),
     !app.latest ? '暂无可用版本'
       : (!needAction ? '已是最新，无需操作'

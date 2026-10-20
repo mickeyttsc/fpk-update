@@ -1,5 +1,5 @@
 appname               = fpk-update
-version               = 1.4.7
+version               = 1.4.9
 display_name          = FPK更新
 desc                  = 一个 GitHub 上 fpk 的下载更新器：填个仓库地址，它自己识别版本、后台下载、校验 sha256，你点一下就能装上。已装的应用就地升级；没装的也能在这里直接完整安装（可选存储空间，装好自动启动）。下载可以自动，安装永远由你点。
 maintainer            = Mickey
@@ -12,5 +12,5 @@ ctl_stop              = true
 service_port          = 18600
 desktop_uidir         = ui
 desktop_applaunchname = fpk-update.main
-changelog             = 1.4.7：修正版本关系判定——本机装的版本比发布版新时（自己打过包、还没发 Release，如 已装 2.9.3-2 而发布版是 2.9.3-1），不再误挂「已锁定旧版」和可点的「安装」，改为徽章「已装较新」+ 按钮禁用，版本行反向显示「已装 X ← 发布版 Y」并说明不会自动降级；「已锁定旧版」现在只在真的钉住旧 tag 做回滚时出现。
+changelog             = 1.4.9：把「本地同名文件与 Release 不一致」这条提示的配色改中性——已是最新时它不需要任何动作（本应用不会改动那个文件，也不影响已装版本），挂橙色警告会让整片卡片像待处理事项，反而把真正的警告淹掉；有新版时仍用橙色提醒下载会覆盖它。
 checksum              =
